@@ -1,0 +1,15 @@
+[package]
+name = "agent-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "arlo"
+path = "src/main.rs"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+agent-llm = { path = "../agent-llm" }
+agent-tools = { path = "../agent-tools" }
+tokio = { workspace = true }
+tracing = { workspace = true }

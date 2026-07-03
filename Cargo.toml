@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/agent-core",
+    "crates/agent-llm",
+    "crates/agent-tools",
+    "crates/agent-mcp",
+    "crates/agent-cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+thiserror = "2"
+async-trait = "0.1"
+futures = "0.3"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+proptest = "1"
+rand = "0.8"
+tempfile = "3"
+glob = "0.3"
+regex = "1"

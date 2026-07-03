@@ -1,0 +1,25 @@
+[package]
+name = "agent-llm"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["openai", "anthropic"]
+openai = []
+anthropic = []
+ollama = []
+all-providers = ["openai", "anthropic", "ollama"]
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

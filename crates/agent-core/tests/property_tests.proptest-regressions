@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f4e48474d5ee29ca1a819a6cdd354a2ece974167a402e2c326ff4d24d07d07be # shrinks to state = RunState { run_id: "A", session_id: None, messages: [], current_turn: 0, max_turns: None, total_cost_usd: 981.5112364412527, total_usage: Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None }, pending_approvals: [], compaction_state: CompactionState { total_compactions: 0, messages_removed: 0, last_compaction_turn: None }, trace_id: "", schema_version: "1.0.0" }
