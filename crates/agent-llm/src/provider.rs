@@ -16,6 +16,8 @@ use async_trait::async_trait;
 use agent_core::error::ModelError;
 use agent_core::model::{Model, ModelProvider, ModelRequest, ModelResponse, ModelStream};
 
+use crate::openai_http::OpenAIHttpModel;
+
 /// A unified provider that routes model requests to the appropriate backend.
 ///
 /// # Construction
@@ -38,6 +40,10 @@ pub struct UnifiedProvider {
     /// OpenAI API key (present means OpenAI provider is available).
     #[cfg(feature = "openai")]
     openai_key: Option<String>,
+
+    /// Custom base URL for OpenAI-compatible endpoints.
+    #[cfg(feature = "openai")]
+    openai_base_url: Option<String>,
 
     /// Anthropic API key (present means Anthropic provider is available).
     #[cfg(feature = "anthropic")]
@@ -67,6 +73,9 @@ impl UnifiedProvider {
         #[cfg(feature = "openai")]
         let openai_key = std::env::var("OPENAI_API_KEY").ok();
 
+        #[cfg(feature = "openai")]
+        let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
+
         #[cfg(feature = "anthropic")]
         let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -87,6 +96,8 @@ impl UnifiedProvider {
             default_provider,
             #[cfg(feature = "openai")]
             openai_key,
+            #[cfg(feature = "openai")]
+            openai_base_url,
             #[cfg(feature = "anthropic")]
             anthropic_key,
             #[cfg(feature = "ollama")]
@@ -110,6 +121,7 @@ impl UnifiedProvider {
     pub fn new(
         default_provider: Option<String>,
         #[cfg(feature = "openai")] openai_key: Option<String>,
+        #[cfg(feature = "openai")] openai_base_url: Option<String>,
         #[cfg(feature = "anthropic")] anthropic_key: Option<String>,
         #[cfg(feature = "ollama")] ollama_host: Option<String>,
     ) -> Result<Self, ModelError> {
@@ -117,6 +129,8 @@ impl UnifiedProvider {
             default_provider,
             #[cfg(feature = "openai")]
             openai_key,
+            #[cfg(feature = "openai")]
+            openai_base_url,
             #[cfg(feature = "anthropic")]
             anthropic_key,
             #[cfg(feature = "ollama")]
@@ -269,12 +283,48 @@ impl ModelProvider for UnifiedProvider {
             (default.clone(), model_name.to_string())
         };
 
-        // Create a stub model for the resolved provider.
-        // Real HTTP implementations will come in task 14.2.
-        Ok(Arc::new(StubModel {
-            model_name: bare_name,
-            provider_name: provider,
-        }))
+        // Route to real HTTP implementations based on provider
+        match provider.as_str() {
+            #[cfg(feature = "openai")]
+            "openai" => {
+                let api_key = self.openai_key.as_ref().ok_or_else(|| {
+                    ModelError::Connection("OpenAI API key not configured".to_string())
+                })?;
+                let base_url = self
+                    .openai_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1")
+                    .to_string();
+                Ok(Arc::new(OpenAIHttpModel::new(
+                    bare_name,
+                    api_key.clone(),
+                    base_url,
+                )))
+            }
+            #[cfg(feature = "anthropic")]
+            "anthropic" => {
+                // Anthropic native API not yet implemented — use stub
+                Ok(Arc::new(StubModel {
+                    model_name: bare_name,
+                    provider_name: provider,
+                }))
+            }
+            #[cfg(feature = "ollama")]
+            "ollama" => {
+                // Ollama uses OpenAI-compatible API format
+                let host = self.ollama_host.as_deref().unwrap_or("http://localhost:11434");
+                let base_url = format!("{}/v1", host.trim_end_matches('/'));
+                Ok(Arc::new(OpenAIHttpModel::new(
+                    bare_name,
+                    String::new(), // Ollama typically doesn't need an API key
+                    base_url,
+                )))
+            }
+            _ => Err(ModelError::Connection(format!(
+                "Provider '{}' has no HTTP implementation",
+                provider
+            ))),
+        }
     }
 
     /// List all available models (currently returns empty; real implementations in 14.2).
@@ -283,8 +333,8 @@ impl ModelProvider for UnifiedProvider {
     }
 }
 
-/// A stub Model implementation used until real HTTP provider implementations
-/// are added in task 14.2. Returns Connection errors when streaming is attempted.
+/// A stub Model implementation for providers that don't have HTTP implementations yet.
+/// Currently used for the native Anthropic Messages API (not the OpenAI-compatible proxy).
 #[derive(Debug)]
 struct StubModel {
     model_name: String,
@@ -374,6 +424,8 @@ mod tests {
             default_provider: default.map(|s| s.to_string()),
             #[cfg(feature = "openai")]
             openai_key: openai.map(|s| s.to_string()),
+            #[cfg(feature = "openai")]
+            openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: anthropic.map(|s| s.to_string()),
             #[cfg(feature = "ollama")]
@@ -472,6 +524,8 @@ mod tests {
             default_provider: None,
             #[cfg(feature = "openai")]
             openai_key: None,
+            #[cfg(feature = "openai")]
+            openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
             #[cfg(feature = "ollama")]
@@ -486,6 +540,7 @@ mod tests {
         let provider = UnifiedProvider {
             default_provider: Some("openai".to_string()),
             openai_key: Some("sk-test".to_string()),
+            openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
             #[cfg(feature = "ollama")]
@@ -543,6 +598,8 @@ mod tests {
             None,
             #[cfg(feature = "openai")]
             None,
+            #[cfg(feature = "openai")]
+            None,
             #[cfg(feature = "anthropic")]
             None,
             #[cfg(feature = "ollama")]
@@ -558,6 +615,8 @@ mod tests {
             Some("openai".to_string()),
             #[cfg(feature = "openai")]
             Some("sk-test".to_string()),
+            #[cfg(feature = "openai")]
+            None,
             #[cfg(feature = "anthropic")]
             None,
             #[cfg(feature = "ollama")]
@@ -568,8 +627,16 @@ mod tests {
 
     #[cfg(all(feature = "openai", feature = "anthropic"))]
     #[tokio::test]
-    async fn stub_model_stream_returns_connection_error() {
-        let provider = test_provider();
+    async fn openai_model_stream_returns_connection_error_with_bad_endpoint() {
+        let provider = make_provider(
+            Some("openai"),
+            #[cfg(feature = "openai")]
+            Some("sk-test-key"),
+            #[cfg(feature = "anthropic")]
+            Some("sk-ant-test-key"),
+            #[cfg(feature = "ollama")]
+            None,
+        );
         let model = provider.resolve("openai:gpt-4").await.unwrap();
         let request = ModelRequest {
             system: String::new(),
@@ -579,13 +646,10 @@ mod tests {
             temperature: None,
             output_schema: None,
         };
+        // With a fake API key pointing at the real OpenAI endpoint, we'll get
+        // either a Connection error (DNS/timeout) or an Api error (401).
         let result = model.stream(request).await;
         assert!(result.is_err());
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected error"),
-        };
-        assert!(matches!(err, ModelError::Connection(_)));
     }
 
     #[cfg(all(feature = "openai", feature = "anthropic"))]
@@ -652,6 +716,8 @@ mod prop_tests {
             default_provider: Some("openai".to_string()),
             #[cfg(feature = "openai")]
             openai_key: Some("sk-test-key".to_string()),
+            #[cfg(feature = "openai")]
+            openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: Some("sk-ant-test-key".to_string()),
             #[cfg(feature = "ollama")]

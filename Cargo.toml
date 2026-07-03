@@ -24,3 +24,5 @@ rand = "0.8"
 tempfile = "3"
 glob = "0.3"
 regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-stream = "0.1"
