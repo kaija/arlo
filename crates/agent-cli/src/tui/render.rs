@@ -1,0 +1,321 @@
+// TUI rendering functions (pure draw logic).
+
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
+
+use super::app::{AppMode, AppState, SpanStyle};
+
+/// Draw the entire TUI frame.
+///
+/// Layout is a vertical split:
+/// - Output area (fills remaining space)
+/// - Input area or permission prompt (3 lines)
+/// - Status bar (1 line)
+pub fn draw(frame: &mut Frame, state: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // output area
+            Constraint::Length(3), // input area / permission prompt
+            Constraint::Length(1), // status bar
+        ])
+        .split(frame.area());
+
+    render_output(frame, state, chunks[0]);
+
+    if state.mode == AppMode::PermissionPrompt {
+        render_permission_prompt(frame, state, chunks[1]);
+    } else {
+        render_input(frame, state, chunks[1]);
+    }
+
+    render_status_bar(frame, state, chunks[2]);
+}
+
+/// Convert a `SpanStyle` to a ratatui `Style`.
+fn span_style_to_ratatui(style: &SpanStyle) -> Style {
+    match style {
+        SpanStyle::Normal => Style::default(),
+        SpanStyle::Thinking => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::ITALIC),
+        SpanStyle::ToolName => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        SpanStyle::ToolOutput => Style::default(),
+        SpanStyle::Error => Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
+        SpanStyle::Warning => Style::default().fg(Color::Yellow),
+        SpanStyle::System => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    }
+}
+
+/// Render the output area showing accumulated agent output with styled spans.
+fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
+    let spans: Vec<Span> = state
+        .output_buffer
+        .iter()
+        .map(|os| Span::styled(os.text.clone(), span_style_to_ratatui(&os.style)))
+        .collect();
+
+    let text = Text::from(Line::from(spans));
+
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .title(" Output ");
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the input area with the current buffer content and cursor.
+fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
+    let input_content = state.input.content();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Input ");
+
+    let paragraph = Paragraph::new(input_content).block(block);
+
+    frame.render_widget(paragraph, area);
+
+    // Set cursor position within the input area.
+    // The block border adds 1 to x and 1 to y offset.
+    let cursor_col = cursor_byte_to_column(state.input.content(), state.input.cursor());
+    let cursor_x = area.x + 1 + cursor_col as u16;
+    let cursor_y = area.y + 1;
+
+    // Only show cursor when idle (input is active).
+    if state.mode == AppMode::Idle {
+        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
+}
+
+/// Render the permission prompt in place of the input area.
+///
+/// Shows the tool name, abbreviated input, and y/a/n hint.
+fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
+    let (tool_name, input_summary) = if let Some(approval) = state.pending_approvals.first() {
+        let name = approval.tool_name.clone();
+        let input_str = approval.tool_input.to_string();
+        let abbreviated = if input_str.len() > 60 {
+            format!("{}...", &input_str[..57])
+        } else {
+            input_str
+        };
+        (name, abbreviated)
+    } else {
+        ("unknown".to_string(), String::new())
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Tool: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(tool_name, Style::default().fg(Color::Yellow)),
+            Span::raw("  Input: "),
+            Span::styled(input_summary, Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("es  "),
+            Span::styled("[a]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("lways  "),
+            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw("o"),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Permission Required ");
+
+    let paragraph = Paragraph::new(lines).block(block);
+
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the status bar showing mode indicator, model name, and token usage.
+fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
+    let mode_span = match state.mode {
+        AppMode::Idle => Span::styled(
+            " IDLE ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        AppMode::Running => Span::styled(
+            " RUNNING ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        AppMode::PermissionPrompt => Span::styled(
+            " PERMISSION ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        AppMode::Exiting => Span::styled(
+            " EXITING ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+
+    let usage_text = if let Some(usage) = &state.last_usage {
+        format!(" tokens: {}in / {}out ", usage.input_tokens, usage.output_tokens)
+    } else {
+        String::new()
+    };
+
+    let status_line = Line::from(vec![
+        mode_span,
+        Span::raw("  "),
+        Span::styled(usage_text, Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let paragraph = Paragraph::new(status_line)
+        .style(Style::default().bg(Color::Black));
+
+    frame.render_widget(paragraph, area);
+}
+
+/// Convert a byte-offset cursor position to a column offset (character count).
+///
+/// This counts the number of characters in `content[..byte_pos]` to determine
+/// the visual column where the cursor should appear.
+fn cursor_byte_to_column(content: &str, byte_pos: usize) -> usize {
+    content[..byte_pos].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_style_normal_is_default() {
+        let style = span_style_to_ratatui(&SpanStyle::Normal);
+        assert_eq!(style, Style::default());
+    }
+
+    #[test]
+    fn span_style_thinking_is_cyan_italic() {
+        let style = span_style_to_ratatui(&SpanStyle::Thinking);
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn span_style_tool_name_is_yellow_bold() {
+        let style = span_style_to_ratatui(&SpanStyle::ToolName);
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn span_style_error_is_red_bold() {
+        let style = span_style_to_ratatui(&SpanStyle::Error);
+        assert_eq!(style.fg, Some(Color::Red));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn span_style_warning_is_yellow() {
+        let style = span_style_to_ratatui(&SpanStyle::Warning);
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn span_style_system_is_dark_gray_dim() {
+        let style = span_style_to_ratatui(&SpanStyle::System);
+        assert_eq!(style.fg, Some(Color::DarkGray));
+        assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn cursor_byte_to_column_ascii() {
+        assert_eq!(cursor_byte_to_column("hello", 0), 0);
+        assert_eq!(cursor_byte_to_column("hello", 3), 3);
+        assert_eq!(cursor_byte_to_column("hello", 5), 5);
+    }
+
+    #[test]
+    fn cursor_byte_to_column_unicode() {
+        // "aéb" — 'a'=1 byte, 'é'=2 bytes, 'b'=1 byte
+        let s = "aéb";
+        assert_eq!(cursor_byte_to_column(s, 0), 0); // before 'a'
+        assert_eq!(cursor_byte_to_column(s, 1), 1); // after 'a'
+        assert_eq!(cursor_byte_to_column(s, 3), 2); // after 'é' (2 bytes)
+        assert_eq!(cursor_byte_to_column(s, 4), 3); // after 'b'
+    }
+
+    #[test]
+    fn cursor_byte_to_column_multibyte() {
+        // "あいう" — each char is 3 bytes
+        let s = "あいう";
+        assert_eq!(cursor_byte_to_column(s, 0), 0);
+        assert_eq!(cursor_byte_to_column(s, 3), 1);
+        assert_eq!(cursor_byte_to_column(s, 6), 2);
+        assert_eq!(cursor_byte_to_column(s, 9), 3);
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// **Validates: Requirements 9.2**
+        ///
+        /// Property 14: Layout bounds fit terminal dimensions — for any terminal
+        /// dimensions (w≥1, h≥4), layout areas sum to terminal height and widths
+        /// ≤ terminal width.
+        #[test]
+        fn layout_bounds_fit_terminal_dimensions(
+            width in 1u16..=500u16,
+            height in 4u16..=500u16,
+        ) {
+            let area = Rect::new(0, 0, width, height);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),      // output area
+                    Constraint::Length(3),   // input area
+                    Constraint::Length(1),   // status bar
+                ])
+                .split(area);
+
+            // All chunks must fit within the terminal area
+            let total_height: u16 = chunks.iter().map(|c| c.height).sum();
+            prop_assert_eq!(total_height, height,
+                "Layout heights sum to {} but terminal height is {}", total_height, height);
+
+            for chunk in chunks.iter() {
+                prop_assert!(chunk.width <= width,
+                    "Chunk width {} exceeds terminal width {}", chunk.width, width);
+                prop_assert!(chunk.x + chunk.width <= width,
+                    "Chunk extends beyond terminal: x={} + w={} > {}", chunk.x, chunk.width, width);
+                prop_assert!(chunk.y + chunk.height <= height,
+                    "Chunk extends below terminal: y={} + h={} > {}", chunk.y, chunk.height, height);
+            }
+        }
+    }
+}

@@ -9,7 +9,8 @@
 //! - `ANTHROPIC_API_KEY` for Anthropic models
 //! - `OLLAMA_HOST` for local Ollama models
 
-use std::io::{self, BufRead, Write};
+mod tui;
+
 use std::process;
 use std::sync::Arc;
 
@@ -148,61 +149,6 @@ async fn run_single_prompt(
     }
 }
 
-/// Run the interactive REPL loop.
-async fn run_repl(provider: Arc<UnifiedProvider>, model: &str) -> Result<(), String> {
-    eprintln!("arlo interactive mode (model: {})", model);
-    eprintln!("Type your prompt and press Enter. Type \"exit\" or \"quit\" to leave.");
-    eprintln!();
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    loop {
-        // Print prompt indicator
-        eprint!("> ");
-        io::stderr().flush().ok();
-
-        // Read a line from stdin
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => {
-                // EOF (Ctrl-D)
-                eprintln!();
-                break;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                return Err(format!("Failed to read input: {}", e));
-            }
-        }
-
-        let trimmed = line.trim();
-
-        // Check for exit commands
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == "exit" || trimmed == "quit" {
-            break;
-        }
-
-        // Run the prompt
-        match run_single_prompt(provider.clone(), model, trimmed).await {
-            Ok(output) => {
-                writeln!(stdout, "{}", output).ok();
-                stdout.flush().ok();
-            }
-            Err(e) => {
-                eprintln!("{}", e);
-            }
-        }
-
-        eprintln!();
-    }
-
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() {
     // Parse arguments
@@ -245,8 +191,8 @@ async fn main() {
             }
         }
         None => {
-            // Interactive REPL mode
-            if let Err(e) = run_repl(provider, &model).await {
+            // Interactive TUI REPL mode
+            if let Err(e) = tui::run_tui_repl(provider, &model, default_tools()).await {
                 eprintln!("{}", e);
                 process::exit(1);
             }

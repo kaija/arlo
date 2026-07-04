@@ -13,3 +13,10 @@ agent-llm = { path = "../agent-llm" }
 agent-tools = { path = "../agent-tools" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+futures = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
