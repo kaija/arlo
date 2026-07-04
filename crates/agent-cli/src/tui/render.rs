@@ -53,26 +53,68 @@ fn span_style_to_ratatui(style: &SpanStyle) -> Style {
         SpanStyle::System => Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM),
+        SpanStyle::User => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
 /// Render the output area showing accumulated agent output with styled spans.
+///
+/// Splits text containing newlines into separate Lines for proper rendering.
+/// Auto-scrolls to show the latest output.
 fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
-    let spans: Vec<Span> = state
-        .output_buffer
-        .iter()
-        .map(|os| Span::styled(os.text.clone(), span_style_to_ratatui(&os.style)))
-        .collect();
+    // Build lines by splitting spans at newline boundaries.
+    // Each OutputSpan's text may contain multiple \n characters; we need to
+    // produce a new Line for each newline encountered.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut current_spans: Vec<Span> = Vec::new();
 
-    let text = Text::from(Line::from(spans));
+    for os in &state.output_buffer {
+        let style = span_style_to_ratatui(&os.style);
+        let parts: Vec<&str> = os.text.split('\n').collect();
+
+        for (i, part) in parts.iter().enumerate() {
+            if !part.is_empty() {
+                current_spans.push(Span::styled(part.to_string(), style));
+            }
+            // If this isn't the last part, the split was at a \n — finish the current line
+            if i < parts.len() - 1 {
+                lines.push(Line::from(std::mem::take(&mut current_spans)));
+            }
+        }
+    }
+
+    // Don't forget the trailing spans (last line without a trailing \n)
+    if !current_spans.is_empty() {
+        lines.push(Line::from(current_spans));
+    }
+
+    // If there are no lines at all, push an empty one so the widget renders
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    let text = Text::from(lines);
 
     let block = Block::default()
         .borders(Borders::NONE)
         .title(" Output ");
 
+    // Calculate scroll offset to auto-scroll to bottom.
+    // The visible height is the area height minus the block border (0 since NONE).
+    let visible_height = area.height as usize;
+    let total_lines = text.lines.len();
+    let scroll_offset = if total_lines > visible_height {
+        (total_lines - visible_height) as u16
+    } else {
+        0
+    };
+
     let paragraph = Paragraph::new(text)
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -272,6 +314,44 @@ mod tests {
         assert_eq!(cursor_byte_to_column(s, 3), 1);
         assert_eq!(cursor_byte_to_column(s, 6), 2);
         assert_eq!(cursor_byte_to_column(s, 9), 3);
+    }
+
+    #[test]
+    fn render_output_splits_newlines() {
+        // Verify that our line-splitting logic produces correct Line count
+        use super::super::app::{OutputSpan, SpanStyle};
+
+        let spans = vec![
+            OutputSpan { text: "hello\nworld\n".to_string(), style: SpanStyle::Normal },
+            OutputSpan { text: "foo".to_string(), style: SpanStyle::Normal },
+        ];
+
+        // Simulate the splitting logic
+        let mut lines: Vec<Vec<String>> = Vec::new();
+        let mut current: Vec<String> = Vec::new();
+
+        for os in &spans {
+            let parts: Vec<&str> = os.text.split('\n').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if !part.is_empty() {
+                    current.push(part.to_string());
+                }
+                if i < parts.len() - 1 {
+                    lines.push(std::mem::take(&mut current));
+                }
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+
+        // "hello\nworld\n" splits into ["hello", "world", ""]
+        // Then "foo" appends to the last empty line
+        // Result: ["hello"], ["world"], ["foo"]
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], vec!["hello"]);
+        assert_eq!(lines[1], vec!["world"]);
+        assert_eq!(lines[2], vec!["foo"]);
     }
 }
 

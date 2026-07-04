@@ -60,6 +60,8 @@ pub enum SpanStyle {
     Warning,
     /// System messages (dim).
     System,
+    /// User input text (displayed distinctly).
+    User,
 }
 
 /// A tool execution entry tracked in the UI.
@@ -368,6 +370,11 @@ impl AppState {
                         style: SpanStyle::Normal,
                     });
                 }
+                // Add separator after response
+                self.output_buffer.push(OutputSpan {
+                    text: "\n".to_string(),
+                    style: SpanStyle::System,
+                });
                 self.last_usage = Some(UsageSummary {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,

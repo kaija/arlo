@@ -59,6 +59,11 @@ impl OpenAIHttpModel {
             "stream": stream,
         });
 
+        // Request usage stats in streaming mode
+        if stream {
+            body["stream_options"] = json!({"include_usage": true});
+        }
+
         if let Some(max_tokens) = request.max_tokens {
             body["max_tokens"] = json!(max_tokens);
         } else {

@@ -65,6 +65,12 @@ pub async fn run_tui_repl(
                 match result {
                     UpdateResult::Continue => {}
                     UpdateResult::StartRun(prompt) => {
+                        // Display user prompt in the output area
+                        state.output_buffer.push(OutputSpan {
+                            text: format!("\n> {}\n\n", prompt),
+                            style: SpanStyle::User,
+                        });
+
                         // Push user message to conversation history
                         state.history.push(Message::User {
                             content: vec![ContentBlock::Text { text: prompt }],
