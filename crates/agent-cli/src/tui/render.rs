@@ -12,15 +12,21 @@ use super::app::{AppMode, AppState, PermissionPromptState, SpanStyle};
 ///
 /// Layout is a vertical split:
 /// - Output area (fills remaining space)
-/// - Input area or permission prompt (3 lines)
+/// - Input area (3 lines) or permission prompt (4 lines for 2 content rows + border)
 /// - Status bar (1 line)
 pub fn draw(frame: &mut Frame, state: &AppState) {
+    let input_height = if state.mode == AppMode::PermissionPrompt {
+        4 // 2 content lines (tool info + options) + 2 border lines
+    } else {
+        3 // 1 content line + 2 border lines
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // output area
-            Constraint::Length(3), // input area / permission prompt
-            Constraint::Length(1), // status bar
+            Constraint::Min(1),              // output area
+            Constraint::Length(input_height), // input area / permission prompt
+            Constraint::Length(1),            // status bar
         ])
         .split(frame.area());
 
@@ -147,13 +153,13 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
 ///
 /// Dispatches on `prompt_state`:
 /// - `AwaitingKey`: show tool info (name + abbreviated input), optional sub-agent prefix,
-///   and the hint line `[y]es  [a]lways  [p]attern  [n]o`.
+///   and selectable options with highlight. Use ←/→ to switch, Enter to confirm.
 /// - `EditingPattern`: show the editable pattern buffer with cursor indicator,
 ///   and `[Enter] confirm  [Esc] cancel` hint.
 fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
     match &state.prompt_state {
-        PermissionPromptState::AwaitingKey => {
-            render_permission_awaiting_key(frame, state, area);
+        PermissionPromptState::AwaitingKey { selected } => {
+            render_permission_awaiting_key(frame, state, *selected, area);
         }
         PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
             render_permission_editing_pattern(frame, edit_buffer, *cursor, area);
@@ -161,8 +167,11 @@ fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 }
 
-/// Render the AwaitingKey permission prompt: tool info + y/a/p/n hint.
-fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, area: Rect) {
+/// Render the AwaitingKey permission prompt: tool info + selectable options.
+///
+/// Shows options as `▸ allow once | always | pattern | deny` with the selected
+/// option highlighted. User can navigate with ←/→ and confirm with Enter.
+fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, selected: usize, area: Rect) {
     let (tool_name, input_summary) = if let Some(approval) = state.pending_approvals.first() {
         let name = approval.tool_name.clone();
         let input_str = approval.tool_input.to_string();
@@ -189,18 +198,49 @@ fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, area: Rec
     tool_line_spans.push(Span::raw("  Input: "));
     tool_line_spans.push(Span::styled(input_summary, Style::default().fg(Color::DarkGray)));
 
+    // Build the selectable options line with highlight on the selected item
+    let options: &[(&str, &str, Color)] = &[
+        ("y", " allow ", Color::Green),
+        ("a", " always ", Color::Cyan),
+        ("p", " pattern ", Color::Blue),
+        ("n", " deny ", Color::Red),
+    ];
+
+    let mut option_spans: Vec<Span> = Vec::new();
+    option_spans.push(Span::styled("◂ ", Style::default().fg(Color::DarkGray)));
+
+    for (i, (key, label, color)) in options.iter().enumerate() {
+        if i == selected {
+            // Highlighted: inverted colors (bg = option color, fg = black)
+            option_spans.push(Span::styled(
+                format!(" [{}]{} ", key, label),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(*color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            // Normal: key in color, label dim
+            option_spans.push(Span::styled(
+                format!("[{}]", key),
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            ));
+            option_spans.push(Span::styled(
+                label.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if i < options.len() - 1 {
+            option_spans.push(Span::raw(" "));
+        }
+    }
+
+    option_spans.push(Span::styled(" ▸", Style::default().fg(Color::DarkGray)));
+    option_spans.push(Span::styled("  ⏎ Enter", Style::default().fg(Color::DarkGray)));
+
     let lines = vec![
         Line::from(tool_line_spans),
-        Line::from(vec![
-            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw(" allow once  "),
-            Span::styled("[a]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" always  "),
-            Span::styled("[p]", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            Span::raw(" pattern  "),
-            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(" deny"),
-        ]),
+        Line::from(option_spans),
     ];
 
     let block = Block::default()

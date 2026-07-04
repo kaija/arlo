@@ -23,14 +23,20 @@ pub enum AppMode {
     Exiting,
 }
 
+/// The number of selectable options in the permission prompt.
+pub const PERMISSION_OPTION_COUNT: usize = 4;
+
 /// Sub-state for the permission prompt overlay.
 ///
 /// Tracks whether the user is at the initial decision point (y/a/p/n)
 /// or editing a pattern string after pressing 'p'.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionPromptState {
-    /// Waiting for user to press y/a/p/n.
-    AwaitingKey,
+    /// Waiting for user to select an option via arrows + Enter or direct key press.
+    AwaitingKey {
+        /// Currently highlighted option index (0=allow, 1=always, 2=pattern, 3=deny).
+        selected: usize,
+    },
     /// User pressed 'p', showing pattern suggestion for editing.
     EditingPattern {
         /// Current edit buffer (user can modify the suggestion).
@@ -238,7 +244,7 @@ impl AppState {
     pub fn new(permissions: PermissionEngine) -> Self {
         Self {
             mode: AppMode::Idle,
-            prompt_state: PermissionPromptState::AwaitingKey,
+            prompt_state: PermissionPromptState::AwaitingKey { selected: 0 },
             output_buffer: Vec::new(),
             history: Vec::new(),
             active_tools: Vec::new(),
@@ -272,7 +278,7 @@ impl AppState {
                 self.pending_approvals = request.pending;
                 self.approval_agent_name = request.agent_name;
                 self.approval_via_handler = true;
-                self.prompt_state = PermissionPromptState::AwaitingKey;
+                self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
                 self.mode = AppMode::PermissionPrompt;
                 UpdateResult::Continue
             }
@@ -391,7 +397,7 @@ impl AppState {
     /// Otherwise, the legacy `ResumeRun` path is used.
     fn handle_prompt_key(&mut self, key: KeyEvent) -> UpdateResult {
         match &self.prompt_state {
-            PermissionPromptState::AwaitingKey => self.handle_awaiting_key(key),
+            PermissionPromptState::AwaitingKey { .. } => self.handle_awaiting_key(key),
             PermissionPromptState::EditingPattern { .. } => self.handle_editing_pattern(key),
         }
     }
@@ -404,69 +410,110 @@ impl AppState {
     /// - 'n': deny
     fn handle_awaiting_key(&mut self, key: KeyEvent) -> UpdateResult {
         match key.code {
-            KeyCode::Char('y') => {
-                if self.approval_via_handler {
-                    let responses: Vec<ApprovalResponse> = self
-                        .pending_approvals
-                        .iter()
-                        .map(|_| ApprovalResponse::Allow)
-                        .collect();
-                    self.clear_approval_state();
-                    UpdateResult::ResolveApproval(responses)
-                } else {
-                    UpdateResult::ResumeRun(true)
-                }
-            }
-            KeyCode::Char('a') => {
-                if self.approval_via_handler {
-                    let responses: Vec<ApprovalResponse> = self
-                        .pending_approvals
-                        .iter()
-                        .map(|pa| ApprovalResponse::AlwaysAllow {
-                            pattern: pa.tool_name.clone(),
-                        })
-                        .collect();
-                    // Also grant session allow in the local permission engine
-                    if let Some(approval) = self.pending_approvals.first() {
-                        self.permissions.grant_session_allow(&approval.tool_name);
+            // Arrow keys navigate the selected option
+            KeyCode::Left => {
+                if let PermissionPromptState::AwaitingKey { ref mut selected } = self.prompt_state {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    } else {
+                        *selected = PERMISSION_OPTION_COUNT - 1;
                     }
-                    self.clear_approval_state();
-                    UpdateResult::ResolveApproval(responses)
-                } else {
-                    // Grant session-level allow for the pending tool (legacy path)
-                    if let Some(approval) = self.pending_approvals.first() {
-                        self.permissions.grant_session_allow(&approval.tool_name);
-                    }
-                    UpdateResult::ResumeRun(true)
-                }
-            }
-            KeyCode::Char('p') => {
-                // Generate a suggested pattern from the current pending approval and
-                // transition to editing mode.
-                if let Some(approval) = self.pending_approvals.first() {
-                    let suggested = suggest_pattern(&approval.tool_name, &approval.tool_input);
-                    let cursor = suggested.len();
-                    self.prompt_state = PermissionPromptState::EditingPattern {
-                        edit_buffer: suggested,
-                        cursor,
-                    };
                 }
                 UpdateResult::Continue
             }
-            KeyCode::Char('n') => {
-                if self.approval_via_handler {
-                    let responses: Vec<ApprovalResponse> = self
-                        .pending_approvals
-                        .iter()
-                        .map(|_| ApprovalResponse::Deny)
-                        .collect();
-                    self.clear_approval_state();
-                    UpdateResult::ResolveApproval(responses)
+            KeyCode::Right => {
+                if let PermissionPromptState::AwaitingKey { ref mut selected } = self.prompt_state {
+                    *selected = (*selected + 1) % PERMISSION_OPTION_COUNT;
+                }
+                UpdateResult::Continue
+            }
+            // Enter confirms the currently selected option
+            KeyCode::Enter => {
+                let selected = if let PermissionPromptState::AwaitingKey { selected } = self.prompt_state {
+                    selected
                 } else {
-                    UpdateResult::ResumeRun(false)
+                    0
+                };
+                match selected {
+                    0 => self.execute_allow(),
+                    1 => self.execute_always(),
+                    2 => self.execute_pattern(),
+                    3 => self.execute_deny(),
+                    _ => UpdateResult::Continue,
                 }
             }
+            // Direct key shortcuts still work
+            KeyCode::Char('y') => self.execute_allow(),
+            KeyCode::Char('a') => self.execute_always(),
+            KeyCode::Char('p') => self.execute_pattern(),
+            KeyCode::Char('n') => self.execute_deny(),
             _ => UpdateResult::Continue,
+        }
+    }
+
+    /// Execute "allow once" action from the permission prompt.
+    fn execute_allow(&mut self) -> UpdateResult {
+        if self.approval_via_handler {
+            let responses: Vec<ApprovalResponse> = self
+                .pending_approvals
+                .iter()
+                .map(|_| ApprovalResponse::Allow)
+                .collect();
+            self.clear_approval_state();
+            UpdateResult::ResolveApproval(responses)
+        } else {
+            UpdateResult::ResumeRun(true)
+        }
+    }
+
+    /// Execute "always allow" action from the permission prompt.
+    fn execute_always(&mut self) -> UpdateResult {
+        if self.approval_via_handler {
+            let responses: Vec<ApprovalResponse> = self
+                .pending_approvals
+                .iter()
+                .map(|pa| ApprovalResponse::AlwaysAllow {
+                    pattern: pa.tool_name.clone(),
+                })
+                .collect();
+            if let Some(approval) = self.pending_approvals.first() {
+                self.permissions.grant_session_allow(&approval.tool_name);
+            }
+            self.clear_approval_state();
+            UpdateResult::ResolveApproval(responses)
+        } else {
+            if let Some(approval) = self.pending_approvals.first() {
+                self.permissions.grant_session_allow(&approval.tool_name);
+            }
+            UpdateResult::ResumeRun(true)
+        }
+    }
+
+    /// Execute "pattern" action — transition to pattern editing mode.
+    fn execute_pattern(&mut self) -> UpdateResult {
+        if let Some(approval) = self.pending_approvals.first() {
+            let suggested = suggest_pattern(&approval.tool_name, &approval.tool_input);
+            let cursor = suggested.len();
+            self.prompt_state = PermissionPromptState::EditingPattern {
+                edit_buffer: suggested,
+                cursor,
+            };
+        }
+        UpdateResult::Continue
+    }
+
+    /// Execute "deny" action from the permission prompt.
+    fn execute_deny(&mut self) -> UpdateResult {
+        if self.approval_via_handler {
+            let responses: Vec<ApprovalResponse> = self
+                .pending_approvals
+                .iter()
+                .map(|_| ApprovalResponse::Deny)
+                .collect();
+            self.clear_approval_state();
+            UpdateResult::ResolveApproval(responses)
+        } else {
+            UpdateResult::ResumeRun(false)
         }
     }
 
@@ -504,13 +551,13 @@ impl AppState {
                     UpdateResult::ResolveApproval(responses)
                 } else {
                     self.permissions.grant_session_allow(&pattern);
-                    self.prompt_state = PermissionPromptState::AwaitingKey;
+                    self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
                     self.pending_approvals.clear();
                     UpdateResult::ResumeRun(true)
                 }
             }
             KeyCode::Esc => {
-                self.prompt_state = PermissionPromptState::AwaitingKey;
+                self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
                 UpdateResult::Continue
             }
             KeyCode::Char(ch) => {
@@ -564,7 +611,7 @@ impl AppState {
         self.pending_approvals.clear();
         self.approval_agent_name = None;
         self.approval_via_handler = false;
-        self.prompt_state = PermissionPromptState::AwaitingKey;
+        self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         self.mode = AppMode::Running;
     }
 
@@ -626,7 +673,7 @@ impl AppState {
 
             RunEvent::Interruption { pending } => {
                 self.mode = AppMode::PermissionPrompt;
-                self.prompt_state = PermissionPromptState::AwaitingKey;
+                self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
                 self.pending_approvals = pending;
                 self.approval_via_handler = false;
                 self.approval_agent_name = None;
@@ -1154,8 +1201,8 @@ mod tests {
         let mut state = make_prompt_state();
         let keys = vec![
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT), // uppercase Y is not y
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
         ];
         for key in keys {
             assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::Continue);
@@ -1831,7 +1878,7 @@ mod suggest_pattern_tests {
     fn prompt_state_defaults_to_awaiting_key() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
         let state = AppState::new(perms);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
     }
 
     #[test]
@@ -1853,7 +1900,7 @@ mod suggest_pattern_tests {
         state.update(AppEvent::AgentEvent(RunEvent::Interruption { pending }));
 
         assert_eq!(state.mode, AppMode::PermissionPrompt);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
     }
 
     #[test]
@@ -1878,7 +1925,7 @@ mod suggest_pattern_tests {
         state.update(AppEvent::ApprovalEvent(request));
 
         assert_eq!(state.mode, AppMode::PermissionPrompt);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
     }
 
     #[test]
@@ -1887,7 +1934,7 @@ mod suggest_pattern_tests {
         let mut state = AppState::new(perms);
         state.mode = AppMode::PermissionPrompt;
         state.approval_via_handler = true;
-        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         state.pending_approvals = vec![PendingApproval {
             tool_name: "Bash".to_string(),
             tool_input: json!({"command": "npm install"}),
@@ -1898,7 +1945,7 @@ mod suggest_pattern_tests {
         let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         state.update(AppEvent::Key(key));
 
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
         assert_eq!(state.mode, AppMode::Running);
     }
 }
@@ -1991,7 +2038,7 @@ mod p_key_handler_tests {
         let perms = PermissionEngine::new(PermissionMode::Normal);
         let mut state = AppState::new(perms);
         state.mode = AppMode::PermissionPrompt;
-        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         state.pending_approvals = vec![PendingApproval {
             tool_name: tool_name.to_string(),
             tool_input,
@@ -2023,14 +2070,14 @@ mod p_key_handler_tests {
         let perms = PermissionEngine::new(PermissionMode::Normal);
         let mut state = AppState::new(perms);
         state.mode = AppMode::PermissionPrompt;
-        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         state.pending_approvals = vec![]; // no pending approvals
 
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         let result = state.update(AppEvent::Key(key));
 
         assert_eq!(result, UpdateResult::Continue);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
     }
 
     // --- EditingPattern: Enter confirms and resolves ---
@@ -2049,7 +2096,7 @@ mod p_key_handler_tests {
         let result = state.update(AppEvent::Key(key_enter));
 
         assert_eq!(result, UpdateResult::ResumeRun(true));
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
         assert!(state.pending_approvals.is_empty());
     }
 
@@ -2096,7 +2143,7 @@ mod p_key_handler_tests {
         let result = state.update(AppEvent::Key(key_esc));
 
         assert_eq!(result, UpdateResult::Continue);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
         assert_eq!(state.mode, AppMode::PermissionPrompt); // still in prompt mode
     }
 
