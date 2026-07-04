@@ -19,7 +19,7 @@ use agent_core::{
     Tool,
 };
 use agent_llm::UnifiedProvider;
-use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool};
+use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
 
 /// Parse CLI arguments manually (no clap dependency needed).
 ///
@@ -82,17 +82,30 @@ fn print_usage() {
     eprintln!("  OPENAI_API_KEY      API key for OpenAI models");
     eprintln!("  ANTHROPIC_API_KEY   API key for Anthropic models");
     eprintln!("  OLLAMA_HOST         Host URL for local Ollama server");
+    eprintln!("  BRAVE_API_KEY       API key for Brave Search (enables web_search tool)");
 }
 
 /// Create the default set of built-in tools.
 fn default_tools() -> Vec<Arc<dyn Tool>> {
-    vec![
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ShellTool::new()),
         Arc::new(FileReadTool::new()),
         Arc::new(FileWriteTool::new()),
         Arc::new(GlobTool::new()),
         Arc::new(GrepTool::new()),
-    ]
+        Arc::new(WebFetchTool::new()),
+    ];
+
+    // Register WebSearchTool only if Brave API key is available
+    if let Ok(api_key) = std::env::var("BRAVE_API_KEY") {
+        if !api_key.is_empty() {
+            tools.push(Arc::new(WebSearchTool::new(
+                Box::new(BraveSearchProvider::new(api_key)),
+            )));
+        }
+    }
+
+    tools
 }
 
 /// Determine the model name to use.

@@ -12,6 +12,11 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+url = "2"
+scraper = "0.21"
+ego-tree = "0.9"
 
 [dev-dependencies]
 proptest = { workspace = true }
