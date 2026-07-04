@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 
 use agent_core::error::ToolError;
-use agent_core::tool::{Concurrency, Tool, ToolContext, ToolOutput};
+use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 /// A tool that executes shell commands.
 ///
@@ -71,6 +71,10 @@ impl Tool for ShellTool {
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
+    }
+
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Always
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {

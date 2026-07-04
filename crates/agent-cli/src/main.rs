@@ -15,8 +15,8 @@ use std::process;
 use std::sync::Arc;
 
 use agent_core::{
-    run, Agent, Input, ModelProvider, PermissionEngine, PermissionMode, RunConfig,
-    Tool,
+    run, Agent, DenyAllApprovalHandler, Input, ModelProvider, PermissionEngine, PermissionMode,
+    RunConfig, Tool,
 };
 use agent_llm::UnifiedProvider;
 use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
@@ -133,6 +133,12 @@ fn resolve_model_name(model_override: Option<String>, provider: &UnifiedProvider
 }
 
 /// Run a single prompt through the agent and return the output.
+///
+/// In single-prompt (non-interactive) mode, a `DenyAllApprovalHandler` is wired
+/// so that any tool requiring approval is automatically denied rather than
+/// hanging on user input that will never come. The default `PermissionMode::Bypass`
+/// means most tools skip permission checks entirely, but if the mode is changed
+/// to `Normal` (e.g., via settings file loading), the handler ensures safe behavior.
 async fn run_single_prompt(
     provider: Arc<UnifiedProvider>,
     model: &str,
@@ -150,6 +156,7 @@ async fn run_single_prompt(
 
     let config = RunConfig::builder(provider.clone(), model)
         .permissions(permissions)
+        .approval_handler(Arc::new(DenyAllApprovalHandler))
         .build();
 
     let input = Input::Fresh {

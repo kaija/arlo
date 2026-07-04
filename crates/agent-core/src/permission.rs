@@ -11,8 +11,12 @@
 //! 3. **Session rules** — If tool name has been granted session-level allow via `grant_session_allow`, allow.
 //! 4. **Tool approval requirement** — Evaluate the tool's `ApprovalRequirement` (Never → Allow, Always → NeedsApproval, Conditional → NeedsApproval with context).
 
-use std::collections::HashSet;
+use std::sync::Arc;
 
+use tokio::sync::RwLock;
+
+use crate::pattern::ToolPattern;
+use crate::settings::MergedPolicy;
 use crate::tool::ApprovalRequirement;
 
 /// The decision returned by the permission engine after evaluating all layers.
@@ -68,23 +72,25 @@ pub enum PermissionMode {
 ///     .with_static_deny(vec!["dangerous_tool".to_string()]);
 ///
 /// // read_file is statically allowed
-/// let decision = engine.check("read_file", &ApprovalRequirement::Always);
+/// let decision = engine.check("read_file", &ApprovalRequirement::Always, None);
 /// assert!(matches!(decision, PermissionDecision::Allow { .. }));
 ///
 /// // dangerous_tool is statically denied
-/// let decision = engine.check("dangerous_tool", &ApprovalRequirement::Never);
+/// let decision = engine.check("dangerous_tool", &ApprovalRequirement::Never, None);
 /// assert!(matches!(decision, PermissionDecision::Deny { .. }));
 /// ```
 #[derive(Debug, Clone)]
 pub struct PermissionEngine {
     /// The operating mode controlling top-level behavior.
     mode: PermissionMode,
-    /// Tool names that are always allowed (Layer 2).
-    static_allow: Vec<String>,
-    /// Tool names that are always denied (Layer 2).
-    static_deny: Vec<String>,
-    /// Tool names granted session-scoped allow via `grant_session_allow` (Layer 3).
-    session_allows: HashSet<String>,
+    /// Tool patterns that are always allowed (Layer 2).
+    static_allow: Vec<ToolPattern>,
+    /// Tool patterns that are always denied (Layer 2).
+    static_deny: Vec<ToolPattern>,
+    /// Tool patterns granted session-scoped allow via `grant_session_allow` (Layer 3).
+    session_allows: Vec<ToolPattern>,
+    /// Optional shared session grants for cross-agent session grant sharing.
+    shared_session_grants: Option<Arc<RwLock<Vec<ToolPattern>>>>,
 }
 
 impl PermissionEngine {
@@ -96,34 +102,60 @@ impl PermissionEngine {
             mode,
             static_allow: Vec::new(),
             static_deny: Vec::new(),
-            session_allows: HashSet::new(),
+            session_allows: Vec::new(),
+            shared_session_grants: None,
         }
     }
 
     /// Builder method: set the static allow list.
     ///
     /// Tools in this list are always permitted without further evaluation.
+    /// Each string is parsed via `ToolPattern::parse` with a Bare fallback.
     pub fn with_static_allow(mut self, allow: Vec<String>) -> Self {
-        self.static_allow = allow;
+        self.static_allow = allow
+            .into_iter()
+            .map(|s| ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)))
+            .collect();
         self
     }
 
     /// Builder method: set the static deny list.
     ///
     /// Tools in this list are always denied without further evaluation.
+    /// Each string is parsed via `ToolPattern::parse` with a Bare fallback.
     pub fn with_static_deny(mut self, deny: Vec<String>) -> Self {
-        self.static_deny = deny;
+        self.static_deny = deny
+            .into_iter()
+            .map(|s| ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)))
+            .collect();
+        self
+    }
+
+    /// Builder method: apply a merged policy to set static allow and deny lists.
+    pub fn with_merged_policy(mut self, policy: MergedPolicy) -> Self {
+        self.static_allow = policy.allow;
+        self.static_deny = policy.deny;
+        self
+    }
+
+    /// Builder method: set the shared session grants store for cross-agent sharing.
+    pub fn with_shared_session_grants(mut self, store: Arc<RwLock<Vec<ToolPattern>>>) -> Self {
+        self.shared_session_grants = Some(store);
         self
     }
 
     /// Add a tool name to the static allow list.
     pub fn add_static_allow(&mut self, tool_name: impl Into<String>) {
-        self.static_allow.push(tool_name.into());
+        let s = tool_name.into();
+        self.static_allow
+            .push(ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)));
     }
 
     /// Add a tool name to the static deny list.
     pub fn add_static_deny(&mut self, tool_name: impl Into<String>) {
-        self.static_deny.push(tool_name.into());
+        let s = tool_name.into();
+        self.static_deny
+            .push(ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)));
     }
 
     /// Get the current permission mode.
@@ -142,12 +174,16 @@ impl PermissionEngine {
     ///
     /// 1. **Mode check**: Bypass → Allow, DenyAll → Deny
     /// 2. **Static rules**: tool name in deny list → Deny, in allow list → Allow
-    /// 3. **Session rules**: tool name in session_allows → Allow
+    /// 3. **Session rules**: tool name in session_allows or shared_session_grants → Allow
     /// 4. **Tool approval requirement**: Never → Allow, Always/Conditional → NeedsApproval
+    ///
+    /// `tool_input` is optional. When `None`, compound patterns evaluate only
+    /// the tool name portion (and never match the arg_glob).
     pub fn check(
         &self,
         tool_name: &str,
         approval_requirement: &ApprovalRequirement,
+        tool_input: Option<&serde_json::Value>,
     ) -> PermissionDecision {
         // Layer 1: Mode check
         match self.mode {
@@ -167,24 +203,36 @@ impl PermissionEngine {
             }
         }
 
-        // Layer 2: Static rules
-        if self.static_deny.iter().any(|name| name == tool_name) {
+        // Layer 2: Static rules — evaluate with tool_input for compound pattern support
+        if self.static_deny.iter().any(|pat| pat.matches(tool_name, tool_input)) {
             return PermissionDecision::Deny {
                 message: format!("Tool '{}' is in the static deny list", tool_name),
                 reason: "static_deny".to_string(),
             };
         }
-        if self.static_allow.iter().any(|name| name == tool_name) {
+        if self.static_allow.iter().any(|pat| pat.matches(tool_name, tool_input)) {
             return PermissionDecision::Allow {
                 reason: Some("static_allow".to_string()),
             };
         }
 
-        // Layer 3: Session rules
-        if self.session_allows.contains(tool_name) {
+        // Layer 3: Session rules — check local session_allows first, then shared store
+        if self.session_allows.iter().any(|pat| pat.matches(tool_name, tool_input)) {
             return PermissionDecision::Allow {
                 reason: Some("session_allow".to_string()),
             };
+        }
+
+        // Check shared session grants (if present). Uses try_read() since check() is synchronous.
+        if let Some(ref shared) = self.shared_session_grants {
+            if let Ok(grants) = shared.try_read() {
+                if grants.iter().any(|pat| pat.matches(tool_name, tool_input)) {
+                    return PermissionDecision::Allow {
+                        reason: Some("session_allow".to_string()),
+                    };
+                }
+            }
+            // If lock can't be acquired (contention), skip shared store check and fall through to Layer 4
         }
 
         // Layer 4: Tool approval requirement
@@ -215,13 +263,36 @@ impl PermissionEngine {
     ///
     /// This is used when the user approves a tool call with "always allow" —
     /// the tool name is stored for the duration of the current run.
+    ///
+    /// Accepts both plain tool names (exact match) and pattern strings
+    /// (e.g., `Bash(npm*)`, `fs_*`).
+    ///
+    /// When `shared_session_grants` is present, also writes to the shared store
+    /// so all agents in the tree see the grant.
     pub fn grant_session_allow(&mut self, tool_name: &str) {
-        self.session_allows.insert(tool_name.to_string());
+        let pattern = ToolPattern::parse(tool_name)
+            .unwrap_or_else(|| ToolPattern::Bare(tool_name.to_string()));
+
+        // Write to shared session grants store (if present) so all agents see it
+        if let Some(ref shared) = self.shared_session_grants {
+            if let Ok(mut grants) = shared.try_write() {
+                if !grants.iter().any(|p| p == &pattern) {
+                    grants.push(pattern.clone());
+                }
+            }
+        }
+
+        // Always push to local session_allows for immediate availability
+        if !self.session_allows.iter().any(|p| p == &pattern) {
+            self.session_allows.push(pattern);
+        }
     }
 
-    /// Check if a tool has been granted session-level allow.
-    pub fn has_session_allow(&self, tool_name: &str) -> bool {
-        self.session_allows.contains(tool_name)
+    /// Check if a tool call is covered by any session grant.
+    ///
+    /// Checks local session_allows patterns against the given tool name and optional input.
+    pub fn has_session_allow(&self, tool_name: &str, tool_input: Option<&serde_json::Value>) -> bool {
+        self.session_allows.iter().any(|pat| pat.matches(tool_name, tool_input))
     }
 
     /// Clear all session-scoped allow rules.
@@ -230,13 +301,13 @@ impl PermissionEngine {
     }
 
     /// Get the static allow list.
-    pub fn static_allow_list(&self) -> &[String] {
-        &self.static_allow
+    pub fn static_allow_list(&self) -> Vec<String> {
+        self.static_allow.iter().map(|p| p.to_string()).collect()
     }
 
     /// Get the static deny list.
-    pub fn static_deny_list(&self) -> &[String] {
-        &self.static_deny
+    pub fn static_deny_list(&self) -> Vec<String> {
+        self.static_deny.iter().map(|p| p.to_string()).collect()
     }
 }
 
@@ -280,7 +351,7 @@ mod tests {
                 let engine = PermissionEngine::new(PermissionMode::Normal)
                     .with_static_deny(deny_list);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Deny { reason, .. } => {
                         prop_assert_eq!(reason, "static_deny");
@@ -306,7 +377,7 @@ mod tests {
                     .with_static_allow(allow_list)
                     .with_static_deny(vec![]);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Allow { reason } => {
                         prop_assert_eq!(reason, Some("static_allow".to_string()));
@@ -327,7 +398,7 @@ mod tests {
                     .with_static_deny(vec![tool_name.clone()])
                     .with_static_allow(vec![tool_name.clone()]);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Deny { reason, .. } => {
                         prop_assert_eq!(reason, "static_deny");
@@ -350,7 +421,7 @@ mod tests {
                     .with_static_deny(deny_list)
                     .with_static_allow(allow_list);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Allow { reason } => {
                         prop_assert_eq!(reason, Some("mode:bypass".to_string()));
@@ -373,7 +444,7 @@ mod tests {
                     .with_static_deny(deny_list)
                     .with_static_allow(allow_list);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Deny { reason, .. } => {
                         prop_assert_eq!(reason, "mode:deny_all");
@@ -396,7 +467,7 @@ mod tests {
 
                 engine.grant_session_allow(&tool_name);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Allow { reason } => {
                         prop_assert_eq!(reason, Some("session_allow".to_string()));
@@ -418,7 +489,7 @@ mod tests {
 
                 engine.grant_session_allow(&tool_name);
 
-                let decision = engine.check(&tool_name, &approval);
+                let decision = engine.check(&tool_name, &approval, None);
                 match decision {
                     PermissionDecision::Deny { reason, .. } => {
                         prop_assert_eq!(reason, "static_deny");
@@ -428,6 +499,230 @@ mod tests {
                     }
                 }
             }
+
+            // ===================================================================
+            // Property 9: First-Match Rule Ordering
+            // **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+            // ===================================================================
+
+            /// Property 9: The first matching rule in an ordered list determines the decision.
+            ///
+            /// When the static_allow list contains a specific tool followed by a glob
+            /// that would also match, the decision should come from the first match.
+            /// Conversely, when tools are ordered so a glob appears first, that glob
+            /// determines the decision for subsequent specific entries too.
+            ///
+            /// **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+            #[test]
+            fn first_match_rule_ordering(
+                prefix in "[a-z]{2,6}",
+                suffix in "[a-z]{1,6}",
+            ) {
+                let specific_tool = format!("{}_{}", prefix, suffix);
+                let glob_pattern = format!("{}_*", prefix);
+
+                // Case 1: If static_deny has the glob first, it denies the specific tool
+                let engine = PermissionEngine::new(PermissionMode::Normal)
+                    .with_static_deny(vec![glob_pattern.clone()])
+                    .with_static_allow(vec![specific_tool.clone()]);
+
+                let decision = engine.check(&specific_tool, &ApprovalRequirement::Always, None);
+                // static_deny is checked before static_allow (Layer 2 ordering: deny first)
+                match decision {
+                    PermissionDecision::Deny { reason, .. } => {
+                        prop_assert_eq!(reason, "static_deny");
+                    }
+                    other => {
+                        prop_assert!(false, "Expected Deny from glob in deny list, got {:?}", other);
+                    }
+                }
+
+                // Case 2: If static_allow has the glob and deny list is empty,
+                // both the specific tool and any matching tool are allowed
+                let engine2 = PermissionEngine::new(PermissionMode::Normal)
+                    .with_static_allow(vec![glob_pattern.clone()]);
+
+                let another_tool = format!("{}_{}", prefix, "xyz");
+                let decision2 = engine2.check(&another_tool, &ApprovalRequirement::Always, None);
+                match decision2 {
+                    PermissionDecision::Allow { reason } => {
+                        prop_assert_eq!(reason, Some("static_allow".to_string()));
+                    }
+                    other => {
+                        prop_assert!(false, "Expected Allow from glob in allow list, got {:?}", other);
+                    }
+                }
+            }
+
+            // ===================================================================
+            // Property 10: Pattern-Based Session Grants
+            // **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+            // ===================================================================
+
+            /// Property 10: Pattern-based session grants match subsequent tool calls correctly.
+            ///
+            /// When a glob pattern is granted as a session allow, any tool whose name
+            /// matches that pattern should be allowed at Layer 3. Tools that don't
+            /// match the pattern should not be affected.
+            ///
+            /// **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+            #[test]
+            fn pattern_based_session_grants(
+                prefix in "[a-z]{2,6}",
+                matching_suffix in "[a-z]{1,6}",
+                non_matching_prefix in "[0-9]{2,6}",
+            ) {
+                let glob_pattern = format!("{}_*", prefix);
+                let matching_tool = format!("{}_{}", prefix, matching_suffix);
+                let non_matching_tool = format!("{}_tool", non_matching_prefix);
+
+                let mut engine = PermissionEngine::new(PermissionMode::Normal);
+                engine.grant_session_allow(&glob_pattern);
+
+                // Matching tool should be allowed via session grant
+                let decision = engine.check(&matching_tool, &ApprovalRequirement::Always, None);
+                match decision {
+                    PermissionDecision::Allow { reason } => {
+                        prop_assert_eq!(reason, Some("session_allow".to_string()));
+                    }
+                    other => {
+                        prop_assert!(false,
+                            "Expected Allow for tool '{}' matching session grant pattern '{}', got {:?}",
+                            matching_tool, glob_pattern, other
+                        );
+                    }
+                }
+
+                // Non-matching tool should NOT be allowed
+                let decision2 = engine.check(&non_matching_tool, &ApprovalRequirement::Always, None);
+                match decision2 {
+                    PermissionDecision::NeedsApproval { .. } => {
+                        // Expected: falls through to Layer 4
+                    }
+                    other => {
+                        prop_assert!(false,
+                            "Expected NeedsApproval for tool '{}' NOT matching pattern '{}', got {:?}",
+                            non_matching_tool, glob_pattern, other
+                        );
+                    }
+                }
+            }
+        }
+
+        // ===================================================================
+        // Property 11: Shared Session Grant Propagation
+        // **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+        // ===================================================================
+
+        /// Property 11: Shared session grant store — a grant written by one engine is visible
+        /// to another engine sharing the same Arc.
+        ///
+        /// When two PermissionEngine instances share the same `Arc<RwLock<Vec<ToolPattern>>>`,
+        /// a session grant written by one engine becomes visible to the other engine's
+        /// `check()` method via the shared store.
+        ///
+        /// **Validates: Requirements 5.5, 6.2, 6.4, 6.5, 7.4, 7.6**
+        #[test]
+        fn shared_session_grant_propagation() {
+            let shared_store: Arc<RwLock<Vec<ToolPattern>>> = Arc::new(RwLock::new(Vec::new()));
+
+            let mut engine_a = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+            let engine_b = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+
+            // Before grant: engine_b should not allow the tool
+            let decision = engine_b.check("shell", &ApprovalRequirement::Always, None);
+            assert!(
+                matches!(decision, PermissionDecision::NeedsApproval { .. }),
+                "Expected NeedsApproval before grant, got {:?}",
+                decision
+            );
+
+            // Engine A grants a session allow
+            engine_a.grant_session_allow("shell");
+
+            // After grant: engine_b should see the grant via shared store
+            let decision = engine_b.check("shell", &ApprovalRequirement::Always, None);
+            assert!(
+                matches!(decision, PermissionDecision::Allow { .. }),
+                "Expected Allow after shared grant, got {:?}",
+                decision
+            );
+        }
+
+        /// Property 11b: Shared session grant propagation with glob patterns.
+        ///
+        /// A glob pattern granted on one engine should match tool calls on the other.
+        #[test]
+        fn shared_session_grant_propagation_with_glob() {
+            let shared_store: Arc<RwLock<Vec<ToolPattern>>> = Arc::new(RwLock::new(Vec::new()));
+
+            let mut engine_a = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+            let engine_b = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+
+            // Engine A grants a pattern-based session allow
+            engine_a.grant_session_allow("fs_*");
+
+            // Engine B should see matching tools as allowed
+            let decision = engine_b.check("fs_read", &ApprovalRequirement::Always, None);
+            assert!(
+                matches!(decision, PermissionDecision::Allow { .. }),
+                "Expected Allow for 'fs_read' via shared glob grant 'fs_*', got {:?}",
+                decision
+            );
+
+            let decision = engine_b.check("fs_write", &ApprovalRequirement::Always, None);
+            assert!(
+                matches!(decision, PermissionDecision::Allow { .. }),
+                "Expected Allow for 'fs_write' via shared glob grant 'fs_*', got {:?}",
+                decision
+            );
+
+            // Non-matching tool should still require approval
+            let decision = engine_b.check("bash", &ApprovalRequirement::Always, None);
+            assert!(
+                matches!(decision, PermissionDecision::NeedsApproval { .. }),
+                "Expected NeedsApproval for 'bash' (not matching 'fs_*'), got {:?}",
+                decision
+            );
+        }
+
+        /// Property 11c: Shared session grant with compound pattern.
+        ///
+        /// A compound pattern granted on one engine should match tool calls with
+        /// matching arguments on the other engine.
+        #[test]
+        fn shared_session_grant_propagation_compound() {
+            let shared_store: Arc<RwLock<Vec<ToolPattern>>> = Arc::new(RwLock::new(Vec::new()));
+
+            let mut engine_a = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+            let engine_b = PermissionEngine::new(PermissionMode::Normal)
+                .with_shared_session_grants(shared_store.clone());
+
+            // Engine A grants a compound pattern
+            engine_a.grant_session_allow("Bash(npm*)");
+
+            // Engine B should allow matching calls
+            let input = serde_json::json!({"command": "npm install"});
+            let decision = engine_b.check("Bash", &ApprovalRequirement::Always, Some(&input));
+            assert!(
+                matches!(decision, PermissionDecision::Allow { .. }),
+                "Expected Allow for 'Bash' with 'npm install' via shared compound grant, got {:?}",
+                decision
+            );
+
+            // Non-matching argument should not be allowed
+            let input = serde_json::json!({"command": "cargo build"});
+            let decision = engine_b.check("Bash", &ApprovalRequirement::Always, Some(&input));
+            assert!(
+                matches!(decision, PermissionDecision::NeedsApproval { .. }),
+                "Expected NeedsApproval for 'Bash' with 'cargo build', got {:?}",
+                decision
+            );
         }
     }
 
@@ -494,7 +789,7 @@ mod tests {
         assert_eq!(engine.mode(), PermissionMode::Normal);
         assert!(engine.static_allow_list().is_empty());
         assert!(engine.static_deny_list().is_empty());
-        assert!(!engine.has_session_allow("anything"));
+        assert!(!engine.has_session_allow("anything", None));
     }
 
     #[test]
@@ -513,8 +808,8 @@ mod tests {
         engine.add_static_allow("read_file");
         engine.add_static_deny("shell");
 
-        assert_eq!(engine.static_allow_list(), &["read_file".to_string()]);
-        assert_eq!(engine.static_deny_list(), &["shell".to_string()]);
+        assert_eq!(engine.static_allow_list(), vec!["read_file".to_string()]);
+        assert_eq!(engine.static_deny_list(), vec!["shell".to_string()]);
     }
 
     #[test]
@@ -522,10 +817,10 @@ mod tests {
         let engine = PermissionEngine::new(PermissionMode::Bypass);
 
         // Even tools with Always approval requirement are allowed in Bypass mode
-        let decision = engine.check("dangerous_tool", &ApprovalRequirement::Always);
+        let decision = engine.check("dangerous_tool", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::Allow { .. }));
 
-        let decision = engine.check("any_tool", &ApprovalRequirement::Never);
+        let decision = engine.check("any_tool", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Allow { .. }));
     }
 
@@ -533,10 +828,10 @@ mod tests {
     fn layer1_deny_all_mode_denies_all() {
         let engine = PermissionEngine::new(PermissionMode::DenyAll);
 
-        let decision = engine.check("safe_tool", &ApprovalRequirement::Never);
+        let decision = engine.check("safe_tool", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
 
-        let decision = engine.check("any_tool", &ApprovalRequirement::Always);
+        let decision = engine.check("any_tool", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
     }
 
@@ -546,7 +841,7 @@ mod tests {
         let engine = PermissionEngine::new(PermissionMode::Bypass)
             .with_static_deny(vec!["shell".to_string()]);
 
-        let decision = engine.check("shell", &ApprovalRequirement::Always);
+        let decision = engine.check("shell", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::Allow { .. }));
     }
 
@@ -556,7 +851,7 @@ mod tests {
         let engine = PermissionEngine::new(PermissionMode::DenyAll)
             .with_static_allow(vec!["read_file".to_string()]);
 
-        let decision = engine.check("read_file", &ApprovalRequirement::Never);
+        let decision = engine.check("read_file", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
     }
 
@@ -565,7 +860,7 @@ mod tests {
         let engine = PermissionEngine::new(PermissionMode::Normal)
             .with_static_deny(vec!["shell".to_string()]);
 
-        let decision = engine.check("shell", &ApprovalRequirement::Never);
+        let decision = engine.check("shell", &ApprovalRequirement::Never, None);
         match decision {
             PermissionDecision::Deny { reason, .. } => {
                 assert_eq!(reason, "static_deny");
@@ -580,7 +875,7 @@ mod tests {
             .with_static_allow(vec!["read_file".to_string()]);
 
         // Even if tool would normally need approval, static allow wins
-        let decision = engine.check("read_file", &ApprovalRequirement::Always);
+        let decision = engine.check("read_file", &ApprovalRequirement::Always, None);
         match decision {
             PermissionDecision::Allow { reason } => {
                 assert_eq!(reason, Some("static_allow".to_string()));
@@ -596,7 +891,7 @@ mod tests {
             .with_static_deny(vec!["ambiguous".to_string()])
             .with_static_allow(vec!["ambiguous".to_string()]);
 
-        let decision = engine.check("ambiguous", &ApprovalRequirement::Never);
+        let decision = engine.check("ambiguous", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
     }
 
@@ -606,7 +901,7 @@ mod tests {
         engine.grant_session_allow("shell");
 
         // Even though shell would normally need approval, session allow wins
-        let decision = engine.check("shell", &ApprovalRequirement::Always);
+        let decision = engine.check("shell", &ApprovalRequirement::Always, None);
         match decision {
             PermissionDecision::Allow { reason } => {
                 assert_eq!(reason, Some("session_allow".to_string()));
@@ -622,7 +917,7 @@ mod tests {
         engine.grant_session_allow("shell");
 
         // Static deny (Layer 2) takes precedence over session allow (Layer 3)
-        let decision = engine.check("shell", &ApprovalRequirement::Never);
+        let decision = engine.check("shell", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
     }
 
@@ -630,7 +925,7 @@ mod tests {
     fn layer4_approval_never_allows() {
         let engine = PermissionEngine::new(PermissionMode::Normal);
 
-        let decision = engine.check("some_tool", &ApprovalRequirement::Never);
+        let decision = engine.check("some_tool", &ApprovalRequirement::Never, None);
         match decision {
             PermissionDecision::Allow { reason } => {
                 assert_eq!(reason, Some("approval_not_required".to_string()));
@@ -643,7 +938,7 @@ mod tests {
     fn layer4_approval_always_needs_approval() {
         let engine = PermissionEngine::new(PermissionMode::Normal);
 
-        let decision = engine.check("dangerous_tool", &ApprovalRequirement::Always);
+        let decision = engine.check("dangerous_tool", &ApprovalRequirement::Always, None);
         match decision {
             PermissionDecision::NeedsApproval { description, context, .. } => {
                 assert!(description.contains("dangerous_tool"));
@@ -660,6 +955,7 @@ mod tests {
         let decision = engine.check(
             "shell",
             &ApprovalRequirement::Conditional("writing to /etc".to_string()),
+            None,
         );
         match decision {
             PermissionDecision::NeedsApproval { description, context, .. } => {
@@ -675,14 +971,14 @@ mod tests {
     fn grant_session_allow_persists() {
         let mut engine = PermissionEngine::new(PermissionMode::Normal);
 
-        assert!(!engine.has_session_allow("shell"));
+        assert!(!engine.has_session_allow("shell", None));
         engine.grant_session_allow("shell");
-        assert!(engine.has_session_allow("shell"));
+        assert!(engine.has_session_allow("shell", None));
 
         // Multiple grants for different tools
         engine.grant_session_allow("file_write");
-        assert!(engine.has_session_allow("shell"));
-        assert!(engine.has_session_allow("file_write"));
+        assert!(engine.has_session_allow("shell", None));
+        assert!(engine.has_session_allow("file_write", None));
     }
 
     #[test]
@@ -691,10 +987,10 @@ mod tests {
         engine.grant_session_allow("shell");
         engine.grant_session_allow("file_write");
 
-        assert!(engine.has_session_allow("shell"));
+        assert!(engine.has_session_allow("shell", None));
         engine.clear_session_allows();
-        assert!(!engine.has_session_allow("shell"));
-        assert!(!engine.has_session_allow("file_write"));
+        assert!(!engine.has_session_allow("shell", None));
+        assert!(!engine.has_session_allow("file_write", None));
     }
 
     #[test]
@@ -703,22 +999,22 @@ mod tests {
         engine.grant_session_allow("shell");
         engine.grant_session_allow("shell"); // duplicate is fine
 
-        assert!(engine.has_session_allow("shell"));
+        assert!(engine.has_session_allow("shell", None));
     }
 
     #[test]
     fn set_mode_changes_behavior() {
         let mut engine = PermissionEngine::new(PermissionMode::Normal);
 
-        let decision = engine.check("tool", &ApprovalRequirement::Always);
+        let decision = engine.check("tool", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::NeedsApproval { .. }));
 
         engine.set_mode(PermissionMode::Bypass);
-        let decision = engine.check("tool", &ApprovalRequirement::Always);
+        let decision = engine.check("tool", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::Allow { .. }));
 
         engine.set_mode(PermissionMode::DenyAll);
-        let decision = engine.check("tool", &ApprovalRequirement::Never);
+        let decision = engine.check("tool", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
     }
 
@@ -730,11 +1026,11 @@ mod tests {
             .with_static_deny(vec!["rm_rf".to_string()]);
 
         // Normal tool, no approval needed
-        let decision = engine.check("grep", &ApprovalRequirement::Never);
+        let decision = engine.check("grep", &ApprovalRequirement::Never, None);
         assert!(matches!(decision, PermissionDecision::Allow { .. }));
 
         // Tool requiring approval
-        let decision = engine.check("shell", &ApprovalRequirement::Always);
+        let decision = engine.check("shell", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::NeedsApproval { .. }));
     }
 
@@ -743,14 +1039,14 @@ mod tests {
         let mut engine = PermissionEngine::new(PermissionMode::Normal);
 
         // First call: needs approval
-        let decision = engine.check("shell", &ApprovalRequirement::Always);
+        let decision = engine.check("shell", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::NeedsApproval { .. }));
 
         // User approves with "always allow"
         engine.grant_session_allow("shell");
 
         // Subsequent calls: allowed via session rule
-        let decision = engine.check("shell", &ApprovalRequirement::Always);
+        let decision = engine.check("shell", &ApprovalRequirement::Always, None);
         assert!(matches!(decision, PermissionDecision::Allow { reason } if reason == Some("session_allow".to_string())));
     }
 }

@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use agent_core::RunStream;
 
 use super::app::AppEvent;
+use super::approval::ApprovalRequest;
 
 /// Handle to event sources that can be stopped by aborting the join handles.
 pub struct EventSources {
@@ -17,16 +18,20 @@ pub struct EventSources {
     pub terminal_handle: JoinHandle<()>,
     /// Handle for the RunStream forwarding task (if active).
     pub stream_handle: Option<JoinHandle<()>>,
+    /// Handle for the approval request forwarding task (if active).
+    pub approval_handle: Option<JoinHandle<()>>,
 }
 
 /// Spawn event source tasks and return a receiver for AppEvents.
 ///
 /// - Spawns a blocking task that polls crossterm at ~30fps (33ms poll timeout)
 /// - If a RunStream is provided, spawns an async task to forward its events
+/// - If an approval_rx is provided, spawns an async task to forward approval requests
 ///
 /// Returns (event_receiver, event_sources)
 pub fn spawn_event_sources(
     run_stream: Option<RunStream>,
+    approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
 ) -> (mpsc::UnboundedReceiver<AppEvent>, EventSources) {
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -53,7 +58,7 @@ pub fn spawn_event_sources(
 
     // RunStream forwarding task (async)
     let stream_handle = run_stream.map(|stream| {
-        let stream_tx = tx;
+        let stream_tx = tx.clone();
         tokio::spawn(async move {
             futures::pin_mut!(stream);
             while let Some(event) = stream.next().await {
@@ -64,5 +69,17 @@ pub fn spawn_event_sources(
         })
     });
 
-    (rx, EventSources { terminal_handle, stream_handle })
+    // Approval request forwarding task (async)
+    let approval_handle = approval_rx.map(|mut rx| {
+        let approval_tx = tx;
+        tokio::spawn(async move {
+            while let Some(request) = rx.recv().await {
+                if approval_tx.send(AppEvent::ApprovalEvent(request)).is_err() {
+                    break;
+                }
+            }
+        })
+    });
+
+    (rx, EventSources { terminal_handle, stream_handle, approval_handle })
 }

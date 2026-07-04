@@ -17,13 +17,15 @@ pub mod state;
 pub mod stream;
 pub mod skill;
 pub mod sub_agent;
+pub mod pattern;
+pub mod settings;
 pub mod tool;
 
 pub use agent::{
     Agent, AgentBuilder, AgentHooks, BoxFuture, HookCallback, Instructions, RunContext,
     SubAgentDef,
 };
-pub use config::{ApprovalHandler, Input, RunConfig, RunConfigBuilder, RunResult};
+pub use config::{ApprovalContext, ApprovalHandler, ApprovalResponse, DenyAllApprovalHandler, Input, RunConfig, RunConfigBuilder, RunResult};
 pub use error::{ModelError, RunError, ToolError};
 pub use event::{RunEvent, RunStream};
 pub use guardrail::{GuardrailResult, InputGuardrail, OutputGuardrail, ToolGuardrail};

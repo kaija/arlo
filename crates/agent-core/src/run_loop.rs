@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, Instructions, RunContext};
 use crate::compactor::{CompactionConfig, CompactionStage, ContextCompactor};
-use crate::config::{Input, RunConfig, RunResult};
+use crate::config::{ApprovalContext, ApprovalResponse, Input, RunConfig, RunResult};
 use crate::error::RunError;
 use crate::event::{RunEvent, RunStream};
 use crate::executor::StreamingToolExecutor;
@@ -41,6 +41,9 @@ use crate::tool::{ToolContext, ToolOutput};
 /// # Returns
 /// `Ok(RunResult)` on successful completion, `Err(RunError)` on failure.
 pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunResult, RunError> {
+    // Clone config to allow mutable access for session grants (AlwaysAllow responses)
+    let mut config = config.clone();
+
     // Initialize state from input
     let mut state = initialize_state(agent, &input);
 
@@ -155,7 +158,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
 
         // Phase 4: Execute tools via StreamingToolExecutor
         let tool_results = if !tool_uses.is_empty() {
-            execute_tools(agent, &tool_uses, config, &state).await
+            execute_tools(agent, &tool_uses, &config, &state).await
         } else {
             Vec::new()
         };
@@ -180,7 +183,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             &state,
             max_turns,
             agent,
-            config,
+            &config,
             recovery_tracker.attempts_for_key("MaxOutputTokens"),
         );
 
@@ -251,17 +254,102 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             }
 
             NextStep::Interruption { pending } => {
-                state.pending_approvals = pending.clone();
-                // Return the current state so it can be resumed
-                let output = extract_text_from_content(&assistant_content);
-                return Ok(RunResult {
-                    output,
-                    structured: None,
-                    usage: state.total_usage.clone(),
-                    cost_usd: state.total_cost_usd,
-                    turns: state.current_turn,
-                    state,
-                });
+                if let Some(ref handler) = config.approval_handler {
+                    // Inline approval: delegate to handler and process responses
+                    let context = ApprovalContext {
+                        agent_name: config.agent_name.clone(),
+                        pending: pending.clone(),
+                    };
+                    let responses = handler.request_approval(&context).await;
+
+                    // Build a set of tool_use_ids that needed approval, mapped to their response
+                    // The request_id format is "approval-{tool_use_id}"
+                    let approval_decisions: Vec<(&PendingApproval, &ApprovalResponse)> =
+                        pending.iter().zip(responses.iter()).collect();
+
+                    // Process each tool result: keep allowed ones, replace denied ones
+                    let mut final_tool_results = Vec::new();
+                    for tr in &tool_results {
+                        // Check if this tool result corresponds to a pending approval
+                        let pending_match = approval_decisions.iter().find(|(pa, _)| {
+                            pa.request_id == format!("approval-{}", tr.tool_use_id)
+                        });
+
+                        if let Some((_pa, response)) = pending_match {
+                            match response {
+                                ApprovalResponse::Allow => {
+                                    // Tool was already executed, keep its result
+                                    final_tool_results.push(tr);
+                                }
+                                ApprovalResponse::Deny => {
+                                    // Tool denied — we'll inject a denial result below
+                                    // Don't include the original result
+                                }
+                                ApprovalResponse::AlwaysAllow { pattern } => {
+                                    // Grant session-wide permission then keep result
+                                    config.permissions.grant_session_allow(pattern);
+                                    final_tool_results.push(tr);
+                                }
+                            }
+                        } else {
+                            // Not a pending approval tool, keep as-is
+                            final_tool_results.push(tr);
+                        }
+                    }
+
+                    // Append assistant message
+                    state.messages.push(Message::Assistant {
+                        content: assistant_content.clone(),
+                        usage: Some(usage.clone()),
+                    });
+
+                    // Append tool results (approved and non-pending)
+                    for tr in &final_tool_results {
+                        let (content, is_error) = match &tr.result {
+                            Ok(output) => (tool_output_to_string(output), false),
+                            Err(e) => (format!("{}", e), true),
+                        };
+                        state.messages.push(Message::ToolResult {
+                            tool_use_id: tr.tool_use_id.clone(),
+                            content,
+                            is_error,
+                        });
+                    }
+
+                    // Inject denial results for denied tools
+                    for (pa, response) in &approval_decisions {
+                        if matches!(response, ApprovalResponse::Deny) {
+                            // Find the tool_use_id from the request_id
+                            let tool_use_id = pa.request_id
+                                .strip_prefix("approval-")
+                                .unwrap_or(&pa.request_id)
+                                .to_string();
+                            state.messages.push(Message::ToolResult {
+                                tool_use_id,
+                                content: format!(
+                                    "Permission denied: tool '{}' was not approved by the user.",
+                                    pa.tool_name
+                                ),
+                                is_error: true,
+                            });
+                        }
+                    }
+
+                    state.current_turn += 1;
+                    // Continue the loop — the model will see the results on next turn
+                } else {
+                    // No handler: preserve existing behavior (return pending state)
+                    state.pending_approvals = pending.clone();
+                    let output = extract_text_from_content(&assistant_content);
+                    return Ok(RunResult {
+                        output,
+                        structured: None,
+                        usage: state.total_usage.clone(),
+                        cost_usd: state.total_cost_usd,
+                        turns: state.current_turn,
+                        state,
+                    });
+                }
             }
 
             NextStep::Recovery { strategy } => {
@@ -609,8 +697,87 @@ impl StreamState {
             }
 
             NextStep::Interruption { pending } => {
-                self.state.pending_approvals = pending.clone();
-                TurnOutcome::Terminal(RunEvent::Interruption { pending })
+                if let Some(ref handler) = self.config.approval_handler {
+                    // Inline approval: delegate to handler and process responses
+                    let context = ApprovalContext {
+                        agent_name: self.config.agent_name.clone(),
+                        pending: pending.clone(),
+                    };
+                    let responses = handler.request_approval(&context).await;
+
+                    // Build a set of tool_use_ids that needed approval, mapped to their response
+                    let approval_decisions: Vec<(&PendingApproval, &ApprovalResponse)> =
+                        pending.iter().zip(responses.iter()).collect();
+
+                    // Process each tool result: keep allowed ones, replace denied ones
+                    let mut final_tool_results = Vec::new();
+                    for tr in &tool_results {
+                        let pending_match = approval_decisions.iter().find(|(pa, _)| {
+                            pa.request_id == format!("approval-{}", tr.tool_use_id)
+                        });
+
+                        if let Some((_pa, response)) = pending_match {
+                            match response {
+                                ApprovalResponse::Allow => {
+                                    final_tool_results.push(tr);
+                                }
+                                ApprovalResponse::Deny => {
+                                    // Denied — skip original result, inject denial below
+                                }
+                                ApprovalResponse::AlwaysAllow { pattern } => {
+                                    self.config.permissions.grant_session_allow(pattern);
+                                    final_tool_results.push(tr);
+                                }
+                            }
+                        } else {
+                            final_tool_results.push(tr);
+                        }
+                    }
+
+                    // Append assistant message
+                    self.state.messages.push(Message::Assistant {
+                        content: assistant_content,
+                        usage: Some(usage),
+                    });
+
+                    // Append approved/non-pending tool results
+                    for tr in &final_tool_results {
+                        let (content, is_error) = match &tr.result {
+                            Ok(output) => (tool_output_to_string(output), false),
+                            Err(e) => (format!("{}", e), true),
+                        };
+                        self.state.messages.push(Message::ToolResult {
+                            tool_use_id: tr.tool_use_id.clone(),
+                            content,
+                            is_error,
+                        });
+                    }
+
+                    // Inject denial results for denied tools
+                    for (pa, response) in &approval_decisions {
+                        if matches!(response, ApprovalResponse::Deny) {
+                            let tool_use_id = pa.request_id
+                                .strip_prefix("approval-")
+                                .unwrap_or(&pa.request_id)
+                                .to_string();
+                            self.state.messages.push(Message::ToolResult {
+                                tool_use_id,
+                                content: format!(
+                                    "Permission denied: tool '{}' was not approved by the user.",
+                                    pa.tool_name
+                                ),
+                                is_error: true,
+                            });
+                        }
+                    }
+
+                    self.state.current_turn += 1;
+                    TurnOutcome::Continue
+                } else {
+                    // No handler: emit terminal Interruption event
+                    self.state.pending_approvals = pending.clone();
+                    TurnOutcome::Terminal(RunEvent::Interruption { pending })
+                }
             }
 
             NextStep::Recovery { strategy } => {
@@ -993,7 +1160,7 @@ fn resolve_next_step(
                 .map(|t| t.approval_requirement())
                 .unwrap_or(crate::tool::ApprovalRequirement::Never);
 
-            let decision = config.permissions.check(&tu.name, &approval_req);
+            let decision = config.permissions.check(&tu.name, &approval_req, Some(&tu.input));
 
             match decision {
                 PermissionDecision::NeedsApproval {
@@ -3185,4 +3352,426 @@ mod tests {
         fn input_cost_per_million(&self) -> f64 { self.input_cost_per_m }
         fn output_cost_per_million(&self) -> f64 { self.output_cost_per_m }
     }
+
+    // ===================================================================
+    // Property 14: Approval Delegation to Parent Handler (Task 8.4)
+    // **Validates: Requirements 7.2, 7.3, 10.1**
+    //
+    // Tests that the run loop's Interruption handling correctly delegates
+    // to the ApprovalHandler when present, processing Allow/Deny/AlwaysAllow
+    // responses, and preserves legacy Interruption behavior when no handler.
+    // ===================================================================
+
+    /// A model that invokes a tool requiring approval, then responds on second call.
+    struct ApprovalToolModel;
+
+    #[async_trait]
+    impl Model for ApprovalToolModel {
+        async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
+            // If there are tool results in messages, respond with final text
+            let has_tool_result = request.messages.iter().any(|m| {
+                matches!(m, Message::ToolResult { .. })
+            });
+
+            if has_tool_result {
+                let chunks = vec![
+                    Ok(StreamChunk::TextDelta {
+                        text: "Approval flow complete.".to_string(),
+                    }),
+                    Ok(StreamChunk::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            cache_read_tokens: None,
+                        },
+                    }),
+                ];
+                return Ok(Box::pin(futures::stream::iter(chunks)));
+            }
+
+            // First call: invoke a tool that requires approval
+            let chunks = vec![
+                Ok(StreamChunk::ToolUseStart {
+                    id: "tool_approval_001".to_string(),
+                    name: "dangerous_tool".to_string(),
+                }),
+                Ok(StreamChunk::ToolUseInputDelta {
+                    id: "tool_approval_001".to_string(),
+                    delta: r#"{"action":"delete"}"#.to_string(),
+                }),
+                Ok(StreamChunk::ToolUseEnd {
+                    id: "tool_approval_001".to_string(),
+                    input: json!({"action": "delete"}),
+                }),
+                Ok(StreamChunk::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 15,
+                        output_tokens: 8,
+                        cache_read_tokens: None,
+                    },
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
+            unimplemented!()
+        }
+
+        fn name(&self) -> &str { "approval-tool-model" }
+        fn provider(&self) -> &str { "mock" }
+        fn context_window(&self) -> usize { 128000 }
+        fn max_output_tokens(&self) -> usize { 4096 }
+        fn supports_tools(&self) -> bool { true }
+        fn input_cost_per_million(&self) -> f64 { 3.0 }
+        fn output_cost_per_million(&self) -> f64 { 15.0 }
+    }
+
+    /// A tool that always requires approval.
+    struct DangerousTool;
+
+    #[async_trait]
+    impl Tool for DangerousTool {
+        fn name(&self) -> &str { "dangerous_tool" }
+        fn description(&self) -> &str { "A tool that requires approval" }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {"action": {"type": "string"}}})
+        }
+        fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
+            Concurrency::Safe
+        }
+        fn approval_requirement(&self) -> crate::tool::ApprovalRequirement {
+            crate::tool::ApprovalRequirement::Always
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, crate::error::ToolError> {
+            Ok(ToolOutput::Text("dangerous action executed".to_string()))
+        }
+    }
+
+    /// An ApprovalHandler that always returns Allow.
+    struct AllowAllHandler;
+
+    #[async_trait]
+    impl crate::config::ApprovalHandler for AllowAllHandler {
+        async fn request_approval(
+            &self,
+            context: &ApprovalContext,
+        ) -> Vec<ApprovalResponse> {
+            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+        }
+    }
+
+    /// An ApprovalHandler that always returns Deny.
+    struct DenyAllHandler;
+
+    #[async_trait]
+    impl crate::config::ApprovalHandler for DenyAllHandler {
+        async fn request_approval(
+            &self,
+            context: &ApprovalContext,
+        ) -> Vec<ApprovalResponse> {
+            context.pending.iter().map(|_| ApprovalResponse::Deny).collect()
+        }
+    }
+
+    /// An ApprovalHandler that returns AlwaysAllow with a specific pattern.
+    struct AlwaysAllowHandler {
+        pattern: String,
+    }
+
+    #[async_trait]
+    impl crate::config::ApprovalHandler for AlwaysAllowHandler {
+        async fn request_approval(
+            &self,
+            context: &ApprovalContext,
+        ) -> Vec<ApprovalResponse> {
+            context
+                .pending
+                .iter()
+                .map(|_| ApprovalResponse::AlwaysAllow {
+                    pattern: self.pattern.clone(),
+                })
+                .collect()
+        }
+    }
+
+    /// An ApprovalHandler that captures the ApprovalContext for verification.
+    struct CapturingApprovalHandler {
+        captured: Arc<std::sync::Mutex<Vec<ApprovalContext>>>,
+    }
+
+    #[async_trait]
+    impl crate::config::ApprovalHandler for CapturingApprovalHandler {
+        async fn request_approval(
+            &self,
+            context: &ApprovalContext,
+        ) -> Vec<ApprovalResponse> {
+            self.captured.lock().unwrap().push(context.clone());
+            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_approval_handler_allow_continues_run() {
+        // When handler returns Allow, the tool result is kept and the loop continues.
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(AllowAllHandler);
+
+        let agent = Agent::builder("approval-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        let result = run(&agent, input, &config).await.unwrap();
+        // The model sees the tool result and responds with "Approval flow complete."
+        assert_eq!(result.output, "Approval flow complete.");
+        assert_eq!(result.turns, 2);
+    }
+
+    #[tokio::test]
+    async fn test_approval_handler_deny_injects_denial_result() {
+        // When handler returns Deny, a denial message is injected and the loop continues.
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllHandler);
+
+        let agent = Agent::builder("deny-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        let result = run(&agent, input, &config).await.unwrap();
+        // The denial result is injected as a ToolResult; the model sees it and responds.
+        assert_eq!(result.output, "Approval flow complete.");
+        assert_eq!(result.turns, 2);
+
+        // Verify that the denial message was injected into the state
+        let has_denial = result.state.messages.iter().any(|m| match m {
+            Message::ToolResult { content, is_error, .. } => {
+                *is_error && content.contains("Permission denied")
+                    && content.contains("dangerous_tool")
+            }
+            _ => false,
+        });
+        assert!(has_denial, "Expected a denial ToolResult in messages");
+    }
+
+    #[tokio::test]
+    async fn test_approval_handler_always_allow_grants_session_permission() {
+        // When handler returns AlwaysAllow, the session grant is stored.
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let handler: Arc<dyn crate::config::ApprovalHandler> =
+            Arc::new(AlwaysAllowHandler {
+                pattern: "dangerous_tool".to_string(),
+            });
+
+        let agent = Agent::builder("always-allow-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        let result = run(&agent, input, &config).await.unwrap();
+        assert_eq!(result.output, "Approval flow complete.");
+        assert_eq!(result.turns, 2);
+    }
+
+    #[tokio::test]
+    async fn test_no_approval_handler_returns_interruption() {
+        // When no handler is set, the run returns with pending_approvals (legacy behavior).
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+
+        let agent = Agent::builder("no-handler-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        // No approval_handler set → None
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        let result = run(&agent, input, &config).await.unwrap();
+        // The run should return early with pending_approvals populated
+        assert!(!result.state.pending_approvals.is_empty());
+        assert_eq!(result.state.pending_approvals.len(), 1);
+        assert_eq!(result.state.pending_approvals[0].tool_name, "dangerous_tool");
+        // The run returns on the first turn without completing
+        assert_eq!(result.turns, 0);
+    }
+
+    #[tokio::test]
+    async fn test_approval_handler_receives_agent_name() {
+        // Verify that the ApprovalContext includes the agent_name from RunConfig.
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<ApprovalContext>::new()));
+        let handler: Arc<dyn crate::config::ApprovalHandler> =
+            Arc::new(CapturingApprovalHandler {
+                captured: Arc::clone(&captured),
+            });
+
+        let agent = Agent::builder("context-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .agent_name("research-sub-agent")
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        let _result = run(&agent, input, &config).await.unwrap();
+
+        let contexts = captured.lock().unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(
+            contexts[0].agent_name,
+            Some("research-sub-agent".to_string())
+        );
+        assert_eq!(contexts[0].pending.len(), 1);
+        assert_eq!(contexts[0].pending[0].tool_name, "dangerous_tool");
+    }
+
+    // ===================================================================
+    // Non-interactive DenyAllApprovalHandler integration tests (Task 13.2)
+    // Validates: Requirements 10.1, 10.2, 10.3
+    // ===================================================================
+
+    #[tokio::test]
+    async fn test_deny_all_approval_handler_denies_tool_in_non_interactive_mode() {
+        // Integration test: use the real DenyAllApprovalHandler (the one from config.rs)
+        // to verify that in non-interactive mode a tool requiring approval is denied,
+        // the denial is injected as a ToolResult, and the run loop completes without hanging.
+        use crate::config::DenyAllApprovalHandler;
+
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllApprovalHandler);
+
+        let agent = Agent::builder("non-interactive-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Do something dangerous".to_string(),
+        };
+
+        // The run should complete without hanging (DenyAllApprovalHandler responds immediately)
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&agent, input, &config),
+        )
+        .await
+        .expect("Run should complete without hanging in non-interactive mode");
+
+        let result = result.expect("Run should succeed");
+
+        // The model should have received the denial and responded
+        assert_eq!(result.output, "Approval flow complete.");
+        assert_eq!(result.turns, 2);
+
+        // Verify that a denial ToolResult was injected into the conversation
+        let has_denial = result.state.messages.iter().any(|m| match m {
+            Message::ToolResult { content, is_error, .. } => {
+                *is_error && content.contains("Permission denied")
+                    && content.contains("dangerous_tool")
+            }
+            _ => false,
+        });
+        assert!(
+            has_denial,
+            "Expected a 'Permission denied' ToolResult for dangerous_tool in non-interactive mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deny_all_approval_handler_run_loop_continues_after_denial() {
+        // Verify the run loop doesn't panic or hang after denial — it continues
+        // processing the model's next response.
+        use crate::config::DenyAllApprovalHandler;
+
+        let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
+        let provider = make_provider(model);
+        let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllApprovalHandler);
+
+        let agent = Agent::builder("continuation-agent")
+            .tool(tool)
+            .build();
+        let permissions = crate::permission::PermissionEngine::new(
+            crate::permission::PermissionMode::Normal,
+        );
+        let config = RunConfig::builder(provider, "mock")
+            .permissions(permissions)
+            .approval_handler(handler)
+            .build();
+        let input = Input::Fresh {
+            prompt: "Try dangerous action".to_string(),
+        };
+
+        let result = run(&agent, input, &config).await.unwrap();
+
+        // The run completed (2 turns: first invokes tool → denied, second is final response)
+        assert_eq!(result.turns, 2);
+        // Output is present (not empty), confirming the model responded after denial
+        assert!(!result.output.is_empty());
+    }
 }
+

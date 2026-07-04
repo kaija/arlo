@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{AppMode, AppState, SpanStyle};
+use super::app::{AppMode, AppState, PermissionPromptState, SpanStyle};
 
 /// Draw the entire TUI frame.
 ///
@@ -145,8 +145,24 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the permission prompt in place of the input area.
 ///
-/// Shows the tool name, abbreviated input, and y/a/n hint.
+/// Dispatches on `prompt_state`:
+/// - `AwaitingKey`: show tool info (name + abbreviated input), optional sub-agent prefix,
+///   and the hint line `[y]es  [a]lways  [p]attern  [n]o`.
+/// - `EditingPattern`: show the editable pattern buffer with cursor indicator,
+///   and `[Enter] confirm  [Esc] cancel` hint.
 fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
+    match &state.prompt_state {
+        PermissionPromptState::AwaitingKey => {
+            render_permission_awaiting_key(frame, state, area);
+        }
+        PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            render_permission_editing_pattern(frame, edit_buffer, *cursor, area);
+        }
+    }
+}
+
+/// Render the AwaitingKey permission prompt: tool info + y/a/p/n hint.
+fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, area: Rect) {
     let (tool_name, input_summary) = if let Some(approval) = state.pending_approvals.first() {
         let name = approval.tool_name.clone();
         let input_str = approval.tool_input.to_string();
@@ -160,20 +176,30 @@ fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
         ("unknown".to_string(), String::new())
     };
 
+    // Build the tool info line, optionally prefixed with sub-agent context
+    let mut tool_line_spans: Vec<Span> = Vec::new();
+    if let Some(ref agent_name) = state.approval_agent_name {
+        tool_line_spans.push(Span::styled(
+            format!("[sub-agent: {}] ", agent_name),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    }
+    tool_line_spans.push(Span::styled("Tool: ", Style::default().add_modifier(Modifier::BOLD)));
+    tool_line_spans.push(Span::styled(tool_name, Style::default().fg(Color::Yellow)));
+    tool_line_spans.push(Span::raw("  Input: "));
+    tool_line_spans.push(Span::styled(input_summary, Style::default().fg(Color::DarkGray)));
+
     let lines = vec![
-        Line::from(vec![
-            Span::styled("Tool: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(tool_name, Style::default().fg(Color::Yellow)),
-            Span::raw("  Input: "),
-            Span::styled(input_summary, Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(tool_line_spans),
         Line::from(vec![
             Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("es  "),
+            Span::raw(" allow once  "),
             Span::styled("[a]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("lways  "),
+            Span::raw(" always  "),
+            Span::styled("[p]", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Span::raw(" pattern  "),
             Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw("o"),
+            Span::raw(" deny"),
         ]),
     ];
 
@@ -184,6 +210,46 @@ fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
     let paragraph = Paragraph::new(lines).block(block);
 
     frame.render_widget(paragraph, area);
+}
+
+/// Render the EditingPattern permission prompt: pattern buffer + confirm/cancel hint.
+///
+/// Shows the current edit buffer with the cursor position indicated by setting
+/// the terminal cursor. Displays `[Enter] confirm  [Esc] cancel` hint below.
+fn render_permission_editing_pattern(
+    frame: &mut Frame,
+    edit_buffer: &str,
+    cursor: usize,
+    area: Rect,
+) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Pattern: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(edit_buffer, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" confirm  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Pattern Grant ");
+
+    let paragraph = Paragraph::new(lines).block(block);
+
+    frame.render_widget(paragraph, area);
+
+    // Set the cursor position within the pattern edit buffer.
+    // Block border adds 1 to x and 1 to y. The "Pattern: " prefix is 9 chars.
+    let prefix_len = "Pattern: ".len() as u16;
+    let cursor_col = cursor_byte_to_column(edit_buffer, cursor) as u16;
+    let cursor_x = area.x + 1 + prefix_len + cursor_col;
+    let cursor_y = area.y + 1;
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
 /// Render the status bar showing mode indicator, model name, and token usage.

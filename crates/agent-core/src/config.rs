@@ -4,6 +4,7 @@
 //! `RunResult` for completed runs, and the `ApprovalHandler` trait for
 //! interactive permission prompts.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,7 +13,38 @@ use crate::message::{Message, Usage};
 use crate::model::ModelProvider;
 use crate::next_step::PendingApproval;
 use crate::permission::{PermissionEngine, PermissionMode};
+use crate::settings::{PolicyMerger, SettingsLoader};
 use crate::state::RunState;
+
+/// The user's decision for a single pending approval request.
+///
+/// Each variant encodes a different level of permission grant:
+/// - `Allow`: approve this single invocation
+/// - `Deny`: reject this single invocation
+/// - `AlwaysAllow`: approve and remember a pattern-based session grant
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalResponse {
+    /// Approve this single tool invocation.
+    Allow,
+    /// Reject this single tool invocation.
+    Deny,
+    /// Approve and register a session-wide pattern grant so future matching
+    /// calls are auto-approved without prompting again.
+    AlwaysAllow { pattern: String },
+}
+
+/// Context passed to an `ApprovalHandler` when requesting approval.
+///
+/// Contains information about which agent is requesting approval and
+/// the list of pending tool calls awaiting a decision.
+#[derive(Debug, Clone)]
+pub struct ApprovalContext {
+    /// The name of the agent requesting approval, if it is a sub-agent.
+    /// `None` for the top-level agent.
+    pub agent_name: Option<String>,
+    /// The pending tool calls requiring approval decisions.
+    pub pending: Vec<PendingApproval>,
+}
 
 /// Trait for handling interactive approval prompts during tool execution.
 ///
@@ -23,9 +55,30 @@ use crate::state::RunState;
 pub trait ApprovalHandler: Send + Sync {
     /// Request approval for one or more pending tool calls.
     ///
-    /// Returns a `Vec<bool>` of the same length as `pending`, where `true`
-    /// means the corresponding tool call is approved and `false` means rejected.
-    async fn request_approval(&self, pending: &[PendingApproval]) -> Vec<bool>;
+    /// Returns a `Vec<ApprovalResponse>` of the same length as `context.pending`,
+    /// encoding the user's decision for each pending tool call.
+    async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse>;
+}
+
+/// An `ApprovalHandler` that unconditionally denies every pending approval.
+///
+/// Used in non-interactive mode (CI/CD, piped stdin, `--non-interactive` flag)
+/// to prevent the run loop from blocking on user input that will never arrive.
+/// Each denied tool call is logged at `warn` level for observability.
+pub struct DenyAllApprovalHandler;
+
+#[async_trait]
+impl ApprovalHandler for DenyAllApprovalHandler {
+    async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
+        for pending in &context.pending {
+            tracing::warn!(
+                tool = %pending.tool_name,
+                agent = ?context.agent_name,
+                "Tool call denied: no interactive approval handler available"
+            );
+        }
+        context.pending.iter().map(|_| ApprovalResponse::Deny).collect()
+    }
 }
 
 /// Configuration for a single agent run.
@@ -51,6 +104,9 @@ pub struct RunConfig {
     pub approval_handler: Option<Arc<dyn ApprovalHandler>>,
     /// Permission engine for tool call authorization.
     pub permissions: PermissionEngine,
+    /// Optional name identifying this agent (used in `ApprovalContext` for sub-agent identification).
+    /// `None` for the top-level agent; `Some(name)` for sub-agents.
+    pub agent_name: Option<String>,
 }
 
 impl std::fmt::Debug for RunConfig {
@@ -64,6 +120,7 @@ impl std::fmt::Debug for RunConfig {
             .field("budget_usd", &self.budget_usd)
             .field("approval_handler", &self.approval_handler.is_some())
             .field("permissions", &self.permissions)
+            .field("agent_name", &self.agent_name)
             .finish()
     }
 }
@@ -85,6 +142,7 @@ impl RunConfig {
             budget_usd: None,
             approval_handler: None,
             permissions: PermissionEngine::new(PermissionMode::Bypass),
+            agent_name: None,
         }
     }
 }
@@ -100,6 +158,7 @@ pub struct RunConfigBuilder {
     budget_usd: Option<f64>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
     permissions: PermissionEngine,
+    agent_name: Option<String>,
 }
 
 impl RunConfigBuilder {
@@ -153,6 +212,46 @@ impl RunConfigBuilder {
         self
     }
 
+    /// Set the agent name for sub-agent identification in approval contexts.
+    ///
+    /// When set, the name is included in `ApprovalContext` so the approval handler
+    /// can distinguish which agent is requesting permission.
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = Some(name.into());
+        self
+    }
+
+    /// Load user-level and project-level settings files and merge them into the permission engine.
+    ///
+    /// This method is opt-in: if not called, no settings files are loaded and
+    /// the permission engine retains its default (or manually configured) state.
+    ///
+    /// Settings are loaded from:
+    /// - User-level: `~/.arlo/settings.json`
+    /// - Project-level: `{working_dir}/.arlo/settings.json`
+    ///
+    /// The merged policy is applied to the permission engine's static allow/deny lists.
+    /// Runtime rules (via `with_static_allow`/`with_static_deny`) should be applied
+    /// separately through the existing API after this call if needed.
+    pub fn load_settings(mut self, working_dir: &Path) -> Self {
+        // Load user-level settings (if home dir is available and file exists)
+        let user_settings = match SettingsLoader::user_path() {
+            Some(path) => SettingsLoader::load(&path),
+            None => Default::default(),
+        };
+
+        // Load project-level settings
+        let project_path = SettingsLoader::project_path(working_dir);
+        let project_settings = SettingsLoader::load(&project_path);
+
+        // Merge user + project (runtime rules are applied separately via existing API)
+        let policy = PolicyMerger::merge(&user_settings, &project_settings, &[], &[]);
+
+        // Apply merged policy to permissions
+        self.permissions = self.permissions.with_merged_policy(policy);
+        self
+    }
+
     /// Consume the builder and produce a `RunConfig`.
     pub fn build(self) -> RunConfig {
         RunConfig {
@@ -165,6 +264,7 @@ impl RunConfigBuilder {
             budget_usd: self.budget_usd,
             approval_handler: self.approval_handler,
             permissions: self.permissions,
+            agent_name: self.agent_name,
         }
     }
 }
@@ -228,9 +328,9 @@ mod tests {
 
     #[async_trait]
     impl ApprovalHandler for MockApprovalHandler {
-        async fn request_approval(&self, pending: &[PendingApproval]) -> Vec<bool> {
+        async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
             // Approve everything
-            pending.iter().map(|_| true).collect()
+            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
         }
     }
 
@@ -402,9 +502,13 @@ mod tests {
             tool_input: json!({"command": "ls"}),
             request_id: "req-1".to_string(),
         }];
-        let decisions = handler.request_approval(&pending).await;
+        let context = ApprovalContext {
+            agent_name: None,
+            pending: pending.clone(),
+        };
+        let decisions = handler.request_approval(&context).await;
         assert_eq!(decisions.len(), 1);
-        assert!(decisions[0]);
+        assert_eq!(decisions[0], ApprovalResponse::Allow);
     }
 
     #[tokio::test]
@@ -422,7 +526,11 @@ mod tests {
                 request_id: "req-2".to_string(),
             },
         ];
-        let decisions = handler.request_approval(&pending).await;
+        let context = ApprovalContext {
+            agent_name: Some("sub-agent".to_string()),
+            pending: pending.clone(),
+        };
+        let decisions = handler.request_approval(&context).await;
         assert_eq!(decisions.len(), 2);
     }
 
@@ -510,5 +618,351 @@ mod tests {
                 .build()
         }));
         assert!(result.is_err(), "Negative infinity temperature should be rejected");
+    }
+
+    // ===================================================================
+    // Settings integration tests (Task 5.2)
+    // Validates: Requirements 3.5, 9.6
+    // ===================================================================
+
+    #[test]
+    fn load_settings_no_call_has_empty_policy() {
+        // When load_settings is never called, the permission engine should have
+        // empty static allow/deny lists (no file loading by default).
+        // Use Normal mode so static rules are actually evaluated.
+        let config = RunConfig::builder(mock_provider(), "test-model")
+            .permissions(PermissionEngine::new(PermissionMode::Normal))
+            .build();
+
+        // In Normal mode with no static rules, a tool with Never approval requirement
+        // should be allowed (falls through to Layer 4 which allows Never).
+        let decision = config.permissions.check(
+            "any_tool",
+            &crate::tool::ApprovalRequirement::Never,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "Without load_settings, tools should pass through (no static deny rules)"
+        );
+
+        // A tool that requires approval should get NeedsApproval (not statically denied/allowed).
+        let decision = config.permissions.check(
+            "some_tool",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            "Without load_settings, no static allow rules → falls through to approval requirement"
+        );
+    }
+
+    #[test]
+    fn load_settings_missing_files_empty_policy() {
+        // Point to a temp directory with no .arlo/settings.json file.
+        // Should produce empty policy (no panics, no errors).
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let config = RunConfig::builder(mock_provider(), "test-model")
+            .permissions(PermissionEngine::new(PermissionMode::Normal))
+            .load_settings(tmp.path())
+            .build();
+
+        // Same behavior as no load_settings call — empty static rules.
+        let decision = config.permissions.check(
+            "any_tool",
+            &crate::tool::ApprovalRequirement::Never,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "Missing settings files should result in empty policy (no static deny rules)"
+        );
+
+        let decision = config.permissions.check(
+            "restricted_tool",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            "Missing settings files should not add any static allow rules"
+        );
+    }
+
+    #[test]
+    fn load_settings_valid_file_applies_rules() {
+        // Create a valid settings.json in a temp directory and verify rules are applied.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let arlo_dir = tmp.path().join(".arlo");
+        std::fs::create_dir_all(&arlo_dir).unwrap();
+        let settings_path = arlo_dir.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{
+                "permissions": {
+                    "allow": ["read_file", "fs_*"],
+                    "deny": ["Bash(rm *)"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = RunConfig::builder(
+            mock_provider(),
+            "test-model",
+        )
+        .permissions(PermissionEngine::new(PermissionMode::Normal))
+        .load_settings(tmp.path())
+        .build();
+
+        // read_file should be statically allowed (matches bare pattern "read_file")
+        let decision = config.permissions.check(
+            "read_file",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "read_file should be statically allowed from settings"
+        );
+
+        // fs_write should be statically allowed (matches glob "fs_*")
+        let decision = config.permissions.check(
+            "fs_write",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "fs_write should match 'fs_*' allow pattern from settings"
+        );
+
+        // Bash with "rm /tmp/foo" should be denied (matches compound pattern "Bash(rm *)")
+        let decision = config.permissions.check(
+            "Bash",
+            &crate::tool::ApprovalRequirement::Never,
+            Some(&json!({"command": "rm /tmp/foo"})),
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Deny { .. }),
+            "Bash(rm *) should be statically denied from settings"
+        );
+
+        // An unrelated tool should fall through to approval requirement
+        let decision = config.permissions.check(
+            "unknown_tool",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            "Tools not in allow/deny should fall through to approval requirement"
+        );
+    }
+
+    #[test]
+    fn load_settings_with_runtime_overrides() {
+        // Test that calling load_settings first, then modifying the engine with
+        // add_static_deny, can override what settings allowed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let arlo_dir = tmp.path().join(".arlo");
+        std::fs::create_dir_all(&arlo_dir).unwrap();
+        let settings_path = arlo_dir.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{
+                "permissions": {
+                    "allow": ["read_file", "fs_*"],
+                    "deny": []
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut config = RunConfig::builder(
+            mock_provider(),
+            "test-model",
+        )
+        .permissions(PermissionEngine::new(PermissionMode::Normal))
+        .load_settings(tmp.path())
+        .build();
+
+        // Initially, read_file is allowed from settings
+        let decision = config.permissions.check(
+            "read_file",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "read_file should be allowed from settings initially"
+        );
+
+        // Now add a runtime deny for read_file (simulating runtime override)
+        config.permissions.add_static_deny("read_file");
+
+        // Deny should take precedence since it's checked first in Layer 2
+        let decision = config.permissions.check(
+            "read_file",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Deny { .. }),
+            "Runtime add_static_deny should override settings allow (deny checked first)"
+        );
+
+        // fs_write should still be allowed (not overridden)
+        let decision = config.permissions.check(
+            "fs_write",
+            &crate::tool::ApprovalRequirement::Always,
+            None,
+        );
+        assert!(
+            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            "fs_write should still match 'fs_*' allow (not overridden by runtime)"
+        );
+    }
+
+    // ===================================================================
+    // DenyAllApprovalHandler tests (Task 7.3)
+    // Property 15: Non-Interactive Mode Default Deny
+    // **Validates: Requirements 10.1, 10.2, 10.3, 10.5**
+    // ===================================================================
+
+    #[tokio::test]
+    async fn deny_all_handler_single_pending_returns_deny() {
+        let handler = DenyAllApprovalHandler;
+        let context = ApprovalContext {
+            agent_name: None,
+            pending: vec![PendingApproval {
+                tool_name: "Bash".to_string(),
+                tool_input: json!({"command": "rm -rf /"}),
+                request_id: "req-1".to_string(),
+            }],
+        };
+        let responses = handler.request_approval(&context).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0], ApprovalResponse::Deny);
+    }
+
+    #[tokio::test]
+    async fn deny_all_handler_multiple_pending_returns_deny_for_all() {
+        let handler = DenyAllApprovalHandler;
+        let context = ApprovalContext {
+            agent_name: Some("research-agent".to_string()),
+            pending: vec![
+                PendingApproval {
+                    tool_name: "Bash".to_string(),
+                    tool_input: json!({"command": "ls"}),
+                    request_id: "req-1".to_string(),
+                },
+                PendingApproval {
+                    tool_name: "file_write".to_string(),
+                    tool_input: json!({"path": "/etc/passwd"}),
+                    request_id: "req-2".to_string(),
+                },
+                PendingApproval {
+                    tool_name: "web_fetch".to_string(),
+                    tool_input: json!({"url": "https://example.com"}),
+                    request_id: "req-3".to_string(),
+                },
+            ],
+        };
+        let responses = handler.request_approval(&context).await;
+        assert_eq!(responses.len(), 3);
+        for response in &responses {
+            assert_eq!(*response, ApprovalResponse::Deny);
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_all_handler_empty_pending_returns_empty() {
+        let handler = DenyAllApprovalHandler;
+        let context = ApprovalContext {
+            agent_name: None,
+            pending: vec![],
+        };
+        let responses = handler.request_approval(&context).await;
+        assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deny_all_handler_never_blocks() {
+        // Verify the handler returns immediately without blocking.
+        // Use a timeout to detect blocking behavior.
+        let handler = DenyAllApprovalHandler;
+        let context = ApprovalContext {
+            agent_name: Some("sub-agent".to_string()),
+            pending: vec![PendingApproval {
+                tool_name: "dangerous_tool".to_string(),
+                tool_input: json!({}),
+                request_id: "req-1".to_string(),
+            }],
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handler.request_approval(&context),
+        )
+        .await;
+
+        assert!(result.is_ok(), "DenyAllApprovalHandler should return immediately without blocking");
+        let responses = result.unwrap();
+        assert_eq!(responses, vec![ApprovalResponse::Deny]);
+    }
+
+    #[tokio::test]
+    async fn deny_all_handler_implements_approval_handler_trait() {
+        // Verify DenyAllApprovalHandler can be used as Arc<dyn ApprovalHandler>
+        let handler: Arc<dyn ApprovalHandler> = Arc::new(DenyAllApprovalHandler);
+        let context = ApprovalContext {
+            agent_name: None,
+            pending: vec![PendingApproval {
+                tool_name: "test_tool".to_string(),
+                tool_input: json!({}),
+                request_id: "req-1".to_string(),
+            }],
+        };
+        let responses = handler.request_approval(&context).await;
+        assert_eq!(responses, vec![ApprovalResponse::Deny]);
+    }
+
+    #[test]
+    fn deny_all_handler_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DenyAllApprovalHandler>();
+    }
+
+    // Property test: DenyAllApprovalHandler returns Deny for any number of pending items
+    proptest! {
+        #[test]
+        fn prop_deny_all_handler_denies_all_items(count in 0usize..50) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let handler = DenyAllApprovalHandler;
+                let pending: Vec<PendingApproval> = (0..count)
+                    .map(|i| PendingApproval {
+                        tool_name: format!("tool_{}", i),
+                        tool_input: json!({"arg": i}),
+                        request_id: format!("req-{}", i),
+                    })
+                    .collect();
+                let context = ApprovalContext {
+                    agent_name: if count % 2 == 0 { None } else { Some("agent".to_string()) },
+                    pending,
+                };
+                let responses = handler.request_approval(&context).await;
+                assert_eq!(responses.len(), count);
+                for response in &responses {
+                    assert_eq!(*response, ApprovalResponse::Deny);
+                }
+            });
+        }
     }
 }

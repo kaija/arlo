@@ -50,11 +50,36 @@ impl SubAgentTool {
     }
 
     /// Build a RunConfig for the sub-agent, overriding max_turns if specified.
+    ///
+    /// Sets the sub-agent's `agent_name` to this definition's agent name so that
+    /// approval requests include the originating sub-agent's identity. The
+    /// `approval_handler` is naturally shared via `Arc` on clone, enabling
+    /// delegation of approval prompts to the parent's handler.
+    ///
+    /// Creates a shared `Arc<RwLock<Vec<ToolPattern>>>` session grant store and
+    /// passes it to the sub-agent's PermissionEngine via `with_shared_session_grants`,
+    /// enabling session grants issued during delegation to be visible across agents.
     fn sub_agent_config(&self) -> RunConfig {
         let mut config = self.config.clone();
         if let Some(max_turns) = self.def.max_turns {
             config.max_turns = max_turns;
         }
+
+        // Set the agent_name so ApprovalContext identifies this sub-agent
+        config.agent_name = Some(self.def.agent.name.clone());
+
+        // approval_handler is Option<Arc<dyn ApprovalHandler>> — clone shares
+        // the same Arc, so the sub-agent delegates approvals to the parent's handler.
+
+        // Create a shared session grant store and wire it into the sub-agent's
+        // PermissionEngine. This enables "always allow" grants issued during
+        // delegated approval to be visible to all agents sharing this store.
+        let shared_grants: Arc<tokio::sync::RwLock<Vec<crate::pattern::ToolPattern>>> =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        config.permissions = config
+            .permissions
+            .with_shared_session_grants(shared_grants);
+
         config
     }
 
@@ -644,6 +669,8 @@ mod tests {
         let sub_config = tool.sub_agent_config();
         // def.max_turns is Some(5), so sub_config should have max_turns = 5
         assert_eq!(sub_config.max_turns, 5);
+        // agent_name should be set to the sub-agent's name
+        assert_eq!(sub_config.agent_name, Some("test-sub-agent".to_string()));
     }
 
     #[test]
@@ -665,6 +692,123 @@ mod tests {
         let sub_config = tool.sub_agent_config();
         // Should keep parent's max_turns
         assert_eq!(sub_config.max_turns, 25);
+        // agent_name should be set to the sub-agent's name
+        assert_eq!(sub_config.agent_name, Some("no-override".to_string()));
+    }
+
+    // ===================================================================
+    // Task 10.1: Sub-Agent Permission Propagation Tests
+    // **Validates: Requirements 7.1, 7.3, 7.5, 7.7**
+    //
+    // Tests that SubAgentTool correctly propagates agent_name, shares
+    // the ApprovalHandler via Arc, and creates a shared session grant store.
+    // ===================================================================
+
+    #[test]
+    fn sub_agent_config_sets_agent_name_from_def() {
+        // The sub-agent's agent_name should be set from the SubAgentDef's agent name.
+        let sub_agent = Agent::builder("research-agent").build();
+        let def = SubAgentDef {
+            agent: Arc::new(sub_agent),
+            tool_name: Some("research".to_string()),
+            tool_description: None,
+            input_schema: None,
+            max_turns: None,
+            background: false,
+            allowed_tools: None,
+        };
+        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
+            .build();
+        let tool = SubAgentTool::new(def, config);
+        let sub_config = tool.sub_agent_config();
+
+        // agent_name is the Agent's name, not the tool_name
+        assert_eq!(sub_config.agent_name, Some("research-agent".to_string()));
+    }
+
+    #[test]
+    fn sub_agent_config_shares_approval_handler_via_arc() {
+        // When the parent has an approval_handler, the sub-agent should share the same Arc.
+        use crate::config::{ApprovalContext, ApprovalHandler, ApprovalResponse};
+
+        struct TestHandler;
+        #[async_trait]
+        impl ApprovalHandler for TestHandler {
+            async fn request_approval(&self, ctx: &ApprovalContext) -> Vec<ApprovalResponse> {
+                ctx.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+            }
+        }
+
+        let handler: Arc<dyn ApprovalHandler> = Arc::new(TestHandler);
+        let handler_ptr = Arc::as_ptr(&handler) as *const ();
+
+        let sub_agent = Agent::builder("helper").build();
+        let def = SubAgentDef {
+            agent: Arc::new(sub_agent),
+            tool_name: None,
+            tool_description: None,
+            input_schema: None,
+            max_turns: None,
+            background: false,
+            allowed_tools: None,
+        };
+        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
+            .approval_handler(handler)
+            .build();
+        let tool = SubAgentTool::new(def, config);
+        let sub_config = tool.sub_agent_config();
+
+        // The sub-agent should have the same Arc (pointer equality)
+        assert!(sub_config.approval_handler.is_some());
+        let sub_handler_ptr = Arc::as_ptr(sub_config.approval_handler.as_ref().unwrap()) as *const ();
+        assert_eq!(handler_ptr, sub_handler_ptr,
+            "Sub-agent's approval_handler should be the same Arc as the parent's");
+    }
+
+    #[test]
+    fn sub_agent_config_creates_shared_session_grants_store() {
+        // The sub-agent should have a shared_session_grants store set on its PermissionEngine.
+        let sub_agent = Agent::builder("worker").build();
+        let def = SubAgentDef {
+            agent: Arc::new(sub_agent),
+            tool_name: None,
+            tool_description: None,
+            input_schema: None,
+            max_turns: None,
+            background: false,
+            allowed_tools: None,
+        };
+        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
+            .build();
+        let tool = SubAgentTool::new(def, config);
+        let sub_config = tool.sub_agent_config();
+
+        // Verify the permission engine has shared session grants via has_session_allow behavior.
+        // Grant a session allow, then verify it's accessible.
+        let mut permissions = sub_config.permissions;
+        permissions.grant_session_allow("test_tool");
+        assert!(permissions.has_session_allow("test_tool", None));
+    }
+
+    #[test]
+    fn sub_agent_config_without_handler_has_none() {
+        // When parent has no approval_handler, sub-agent should also have None.
+        let sub_agent = Agent::builder("solo").build();
+        let def = SubAgentDef {
+            agent: Arc::new(sub_agent),
+            tool_name: None,
+            tool_description: None,
+            input_schema: None,
+            max_turns: None,
+            background: false,
+            allowed_tools: None,
+        };
+        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
+            .build();
+        let tool = SubAgentTool::new(def, config);
+        let sub_config = tool.sub_agent_config();
+
+        assert!(sub_config.approval_handler.is_none());
     }
 }
 

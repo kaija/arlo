@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use agent_core::{ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent, StreamChunk};
+use agent_core::{ApprovalResponse, ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent, StreamChunk};
+use agent_core::pattern::extract_primary_arg;
 
+use super::approval::ApprovalRequest;
 use super::input::InputBuffer;
 
 /// The mode the TUI application is currently in.
@@ -21,6 +23,87 @@ pub enum AppMode {
     Exiting,
 }
 
+/// Sub-state for the permission prompt overlay.
+///
+/// Tracks whether the user is at the initial decision point (y/a/p/n)
+/// or editing a pattern string after pressing 'p'.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionPromptState {
+    /// Waiting for user to press y/a/p/n.
+    AwaitingKey,
+    /// User pressed 'p', showing pattern suggestion for editing.
+    EditingPattern {
+        /// Current edit buffer (user can modify the suggestion).
+        edit_buffer: String,
+        /// Cursor position within edit_buffer.
+        cursor: usize,
+    },
+}
+
+/// Generate a suggested `ToolPattern` string from a tool call context.
+///
+/// Heuristics:
+/// - For Bash: if the command starts with a known prefix (npm, git, cargo, make,
+///   docker, pip, yarn, pnpm), suggest `Bash({prefix}*)`. Otherwise, use the first
+///   word of the command.
+/// - For file tools (tool names starting with `fs_`, `read_`, or `write_`): if the
+///   path has a directory prefix, suggest `{tool_name}({dir_prefix}*)`.
+/// - Fallback: suggest the exact tool name (equivalent to the 'a' key).
+///
+/// The returned string is always parseable by `ToolPattern::parse` and always matches
+/// the original tool call.
+pub fn suggest_pattern(tool_name: &str, tool_input: &serde_json::Value) -> String {
+    const KNOWN_BASH_PREFIXES: &[&str] = &[
+        "npm", "git", "cargo", "make", "docker", "pip", "yarn", "pnpm",
+    ];
+
+    if let Some(primary_arg) = extract_primary_arg(tool_input) {
+        // Bash tool: suggest based on command prefix
+        if tool_name == "Bash" || tool_name == "bash" {
+            for prefix in KNOWN_BASH_PREFIXES {
+                if primary_arg.starts_with(prefix) {
+                    return format!("{}({}*)", tool_name, prefix);
+                }
+            }
+            // No known prefix — use everything up to and including the first
+            // whitespace-delimited word (preserving any leading whitespace so the
+            // pattern still matches the original arg via glob).
+            let first_word_end = primary_arg
+                .char_indices()
+                .skip_while(|(_, c)| c.is_whitespace()) // skip leading whitespace
+                .find(|(_, c)| c.is_whitespace()) // find end of first word
+                .map(|(i, _)| i)
+                .unwrap_or(primary_arg.len());
+            let prefix = &primary_arg[..first_word_end];
+            if !prefix.is_empty() {
+                return format!("{}({}*)", tool_name, prefix);
+            }
+        }
+
+        // File tools: if path has a directory prefix, suggest tool_name(dir/*)
+        if tool_name.starts_with("fs_")
+            || tool_name.starts_with("read_")
+            || tool_name.starts_with("write_")
+        {
+            if let Some(last_slash) = primary_arg.rfind('/') {
+                let dir_prefix = &primary_arg[..=last_slash];
+                return format!("{}({}*)", tool_name, dir_prefix);
+            }
+        }
+
+        // Generic: tool_name(truncated_arg*) — truncate long arguments
+        let truncated = if primary_arg.len() > 20 {
+            &primary_arg[..20]
+        } else {
+            primary_arg
+        };
+        return format!("{}({}*)", tool_name, truncated);
+    }
+
+    // No primary arg found: suggest exact tool name
+    tool_name.to_string()
+}
+
 /// Events that drive the TUI application state machine.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -32,6 +115,8 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// A periodic tick for animations/heartbeat.
     Tick,
+    /// An approval request from the InteractiveApprovalHandler channel.
+    ApprovalEvent(ApprovalRequest),
 }
 
 /// A styled span of output text for rendering.
@@ -107,6 +192,9 @@ pub enum UpdateResult {
     /// Resume a paused run after permission prompt.
     /// The bool indicates whether permission was granted (true) or denied (false).
     ResumeRun(bool),
+    /// Resolve an approval request from the InteractiveApprovalHandler channel.
+    /// Contains the responses to send back via the response channel.
+    ResolveApproval(Vec<ApprovalResponse>),
     /// Abort the currently running agent execution.
     AbortRun,
     /// Exit the application.
@@ -117,6 +205,8 @@ pub enum UpdateResult {
 pub struct AppState {
     /// Current application mode.
     pub mode: AppMode,
+    /// Sub-state for the permission prompt (active when `mode == PermissionPrompt`).
+    pub prompt_state: PermissionPromptState,
     /// Accumulated output spans for rendering.
     pub output_buffer: Vec<OutputSpan>,
     /// Conversation history across prompts in this session.
@@ -127,6 +217,12 @@ pub struct AppState {
     pub permissions: PermissionEngine,
     /// Pending approval requests when in PermissionPrompt mode.
     pub pending_approvals: Vec<PendingApproval>,
+    /// The agent name associated with the current approval request (for sub-agent context).
+    /// `Some(name)` when a sub-agent triggered the prompt; `None` for top-level agent.
+    pub approval_agent_name: Option<String>,
+    /// Whether the current permission prompt originated from the handler channel.
+    /// When true, the response goes back via ResolveApproval; when false, via ResumeRun.
+    pub approval_via_handler: bool,
     /// The text input buffer.
     pub input: InputBuffer,
     /// Timestamp of the last Ctrl-C press (for double-press detection).
@@ -142,11 +238,14 @@ impl AppState {
     pub fn new(permissions: PermissionEngine) -> Self {
         Self {
             mode: AppMode::Idle,
+            prompt_state: PermissionPromptState::AwaitingKey,
             output_buffer: Vec::new(),
             history: Vec::new(),
             active_tools: Vec::new(),
             permissions,
             pending_approvals: Vec::new(),
+            approval_agent_name: None,
+            approval_via_handler: false,
             input: InputBuffer::new(),
             last_ctrl_c: None,
             ctrl_c_abort_pending: false,
@@ -167,6 +266,16 @@ impl AppState {
                 AppMode::PermissionPrompt => self.handle_prompt_key(key_event),
                 AppMode::Exiting => UpdateResult::Exit,
             },
+            AppEvent::ApprovalEvent(request) => {
+                // An approval request arrived from the InteractiveApprovalHandler channel.
+                // Store the pending approvals and agent name, then show the permission prompt.
+                self.pending_approvals = request.pending;
+                self.approval_agent_name = request.agent_name;
+                self.approval_via_handler = true;
+                self.prompt_state = PermissionPromptState::AwaitingKey;
+                self.mode = AppMode::PermissionPrompt;
+                UpdateResult::Continue
+            }
             AppEvent::Resize(_, _) => {
                 // ratatui handles terminal resize automatically during render
                 UpdateResult::Continue
@@ -271,25 +380,192 @@ impl AppState {
         UpdateResult::Continue
     }
 
-    /// Handle a key event while in PermissionPrompt mode (y/a/n).
+    /// Handle a key event while in PermissionPrompt mode (y/a/p/n).
     ///
-    /// - 'y': one-time approve → ResumeRun(true)
-    /// - 'a': grant session allow for the tool → ResumeRun(true)
-    /// - 'n': deny → ResumeRun(false)
-    /// - All other keys: ignored
+    /// Dispatches based on the current `prompt_state`:
+    /// - `AwaitingKey`: handle y/a/p/n decisions
+    /// - `EditingPattern`: handle text editing, Enter to confirm, Esc to cancel
+    ///
+    /// When the prompt was triggered by the InteractiveApprovalHandler channel
+    /// (`approval_via_handler == true`), responses are sent back via `ResolveApproval`.
+    /// Otherwise, the legacy `ResumeRun` path is used.
     fn handle_prompt_key(&mut self, key: KeyEvent) -> UpdateResult {
+        match &self.prompt_state {
+            PermissionPromptState::AwaitingKey => self.handle_awaiting_key(key),
+            PermissionPromptState::EditingPattern { .. } => self.handle_editing_pattern(key),
+        }
+    }
+
+    /// Handle key events in the `AwaitingKey` sub-state of the permission prompt.
+    ///
+    /// - 'y': one-time approve
+    /// - 'a': always allow exact tool name
+    /// - 'p': transition to pattern editing mode with a suggested pattern
+    /// - 'n': deny
+    fn handle_awaiting_key(&mut self, key: KeyEvent) -> UpdateResult {
         match key.code {
-            KeyCode::Char('y') => UpdateResult::ResumeRun(true),
-            KeyCode::Char('a') => {
-                // Grant session-level allow for the pending tool
-                if let Some(approval) = self.pending_approvals.first() {
-                    self.permissions.grant_session_allow(&approval.tool_name);
+            KeyCode::Char('y') => {
+                if self.approval_via_handler {
+                    let responses: Vec<ApprovalResponse> = self
+                        .pending_approvals
+                        .iter()
+                        .map(|_| ApprovalResponse::Allow)
+                        .collect();
+                    self.clear_approval_state();
+                    UpdateResult::ResolveApproval(responses)
+                } else {
+                    UpdateResult::ResumeRun(true)
                 }
-                UpdateResult::ResumeRun(true)
             }
-            KeyCode::Char('n') => UpdateResult::ResumeRun(false),
+            KeyCode::Char('a') => {
+                if self.approval_via_handler {
+                    let responses: Vec<ApprovalResponse> = self
+                        .pending_approvals
+                        .iter()
+                        .map(|pa| ApprovalResponse::AlwaysAllow {
+                            pattern: pa.tool_name.clone(),
+                        })
+                        .collect();
+                    // Also grant session allow in the local permission engine
+                    if let Some(approval) = self.pending_approvals.first() {
+                        self.permissions.grant_session_allow(&approval.tool_name);
+                    }
+                    self.clear_approval_state();
+                    UpdateResult::ResolveApproval(responses)
+                } else {
+                    // Grant session-level allow for the pending tool (legacy path)
+                    if let Some(approval) = self.pending_approvals.first() {
+                        self.permissions.grant_session_allow(&approval.tool_name);
+                    }
+                    UpdateResult::ResumeRun(true)
+                }
+            }
+            KeyCode::Char('p') => {
+                // Generate a suggested pattern from the current pending approval and
+                // transition to editing mode.
+                if let Some(approval) = self.pending_approvals.first() {
+                    let suggested = suggest_pattern(&approval.tool_name, &approval.tool_input);
+                    let cursor = suggested.len();
+                    self.prompt_state = PermissionPromptState::EditingPattern {
+                        edit_buffer: suggested,
+                        cursor,
+                    };
+                }
+                UpdateResult::Continue
+            }
+            KeyCode::Char('n') => {
+                if self.approval_via_handler {
+                    let responses: Vec<ApprovalResponse> = self
+                        .pending_approvals
+                        .iter()
+                        .map(|_| ApprovalResponse::Deny)
+                        .collect();
+                    self.clear_approval_state();
+                    UpdateResult::ResolveApproval(responses)
+                } else {
+                    UpdateResult::ResumeRun(false)
+                }
+            }
             _ => UpdateResult::Continue,
         }
+    }
+
+    /// Handle key events in the `EditingPattern` sub-state of the permission prompt.
+    ///
+    /// - Printable chars: insert at cursor position
+    /// - Backspace: delete char before cursor
+    /// - Delete: delete char at cursor
+    /// - Left/Right arrows: move cursor
+    /// - Enter: confirm the pattern, grant session allow and resolve
+    /// - Esc: cancel, return to AwaitingKey state
+    fn handle_editing_pattern(&mut self, key: KeyEvent) -> UpdateResult {
+        // We need to extract mutable references to the edit_buffer and cursor.
+        // Use a temporary to avoid borrow conflicts with self.
+        let (edit_buffer, cursor) = match &mut self.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                (edit_buffer, cursor)
+            }
+            _ => return UpdateResult::Continue,
+        };
+
+        match key.code {
+            KeyCode::Enter => {
+                let pattern = edit_buffer.clone();
+                if self.approval_via_handler {
+                    let responses: Vec<ApprovalResponse> = self
+                        .pending_approvals
+                        .iter()
+                        .map(|_| ApprovalResponse::AlwaysAllow {
+                            pattern: pattern.clone(),
+                        })
+                        .collect();
+                    self.permissions.grant_session_allow(&pattern);
+                    self.clear_approval_state();
+                    UpdateResult::ResolveApproval(responses)
+                } else {
+                    self.permissions.grant_session_allow(&pattern);
+                    self.prompt_state = PermissionPromptState::AwaitingKey;
+                    self.pending_approvals.clear();
+                    UpdateResult::ResumeRun(true)
+                }
+            }
+            KeyCode::Esc => {
+                self.prompt_state = PermissionPromptState::AwaitingKey;
+                UpdateResult::Continue
+            }
+            KeyCode::Char(ch) => {
+                edit_buffer.insert(*cursor, ch);
+                *cursor += ch.len_utf8();
+                UpdateResult::Continue
+            }
+            KeyCode::Backspace => {
+                if *cursor > 0 {
+                    let prev_char_len = edit_buffer[..*cursor]
+                        .chars()
+                        .last()
+                        .map_or(0, |c| c.len_utf8());
+                    *cursor -= prev_char_len;
+                    edit_buffer.remove(*cursor);
+                }
+                UpdateResult::Continue
+            }
+            KeyCode::Delete => {
+                if *cursor < edit_buffer.len() {
+                    edit_buffer.remove(*cursor);
+                }
+                UpdateResult::Continue
+            }
+            KeyCode::Left => {
+                if *cursor > 0 {
+                    let prev_len = edit_buffer[..*cursor]
+                        .chars()
+                        .last()
+                        .map_or(0, |c| c.len_utf8());
+                    *cursor -= prev_len;
+                }
+                UpdateResult::Continue
+            }
+            KeyCode::Right => {
+                if *cursor < edit_buffer.len() {
+                    let next_len = edit_buffer[*cursor..]
+                        .chars()
+                        .next()
+                        .map_or(0, |c| c.len_utf8());
+                    *cursor += next_len;
+                }
+                UpdateResult::Continue
+            }
+            _ => UpdateResult::Continue,
+        }
+    }
+
+    /// Clear approval-related state after responding to a handler-based prompt.
+    fn clear_approval_state(&mut self) {
+        self.pending_approvals.clear();
+        self.approval_agent_name = None;
+        self.approval_via_handler = false;
+        self.prompt_state = PermissionPromptState::AwaitingKey;
+        self.mode = AppMode::Running;
     }
 
     /// Handle a `RunEvent` from the agent's RunStream.
@@ -350,7 +626,10 @@ impl AppState {
 
             RunEvent::Interruption { pending } => {
                 self.mode = AppMode::PermissionPrompt;
+                self.prompt_state = PermissionPromptState::AwaitingKey;
                 self.pending_approvals = pending;
+                self.approval_via_handler = false;
+                self.approval_agent_name = None;
             }
 
             RunEvent::AgentEnd {
@@ -1080,8 +1359,8 @@ mod property_tests {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
         fn permission_prompt_filters_non_yan_keys(
-            ch in any::<char>().prop_filter("exclude y/a/n", |c| {
-                *c != 'y' && *c != 'a' && *c != 'n'
+            ch in any::<char>().prop_filter("exclude y/a/p/n", |c| {
+                *c != 'y' && *c != 'a' && *c != 'n' && *c != 'p'
             })
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
@@ -1355,7 +1634,7 @@ mod property_tests {
             prop_assert_eq!(result, UpdateResult::ResumeRun(true));
 
             // Verify the permission engine now allows this tool
-            let decision = state.permissions.check(&tool_name, &ApprovalRequirement::Always);
+            let decision = state.permissions.check(&tool_name, &ApprovalRequirement::Always, None);
             match decision {
                 PermissionDecision::Allow { reason } => {
                     prop_assert_eq!(reason, Some("session_allow".to_string()));
@@ -1365,5 +1644,715 @@ mod property_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod suggest_pattern_tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- suggest_pattern tests ---
+
+    #[test]
+    fn suggest_pattern_bash_npm_prefix() {
+        let input = json!({"command": "npm install lodash"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(npm*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_git_prefix() {
+        let input = json!({"command": "git push origin main"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(git*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_cargo_prefix() {
+        let input = json!({"command": "cargo build --release"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(cargo*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_make_prefix() {
+        let input = json!({"command": "make test"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(make*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_docker_prefix() {
+        let input = json!({"command": "docker build ."});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(docker*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_pip_prefix() {
+        let input = json!({"command": "pip install requests"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(pip*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_yarn_prefix() {
+        let input = json!({"command": "yarn add react"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(yarn*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_pnpm_prefix() {
+        let input = json!({"command": "pnpm install"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(pnpm*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_unknown_command_uses_first_word() {
+        let input = json!({"command": "ls -la /tmp"});
+        let result = suggest_pattern("Bash", &input);
+        assert_eq!(result, "Bash(ls*)");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_lowercase_tool_name() {
+        let input = json!({"command": "npm run build"});
+        let result = suggest_pattern("bash", &input);
+        assert_eq!(result, "bash(npm*)");
+    }
+
+    #[test]
+    fn suggest_pattern_file_tool_with_directory() {
+        let input = json!({"path": "/tmp/foo/bar.txt"});
+        let result = suggest_pattern("fs_write", &input);
+        assert_eq!(result, "fs_write(/tmp/foo/*)");
+    }
+
+    #[test]
+    fn suggest_pattern_file_tool_with_root_dir() {
+        let input = json!({"path": "/etc/config.json"});
+        let result = suggest_pattern("fs_read", &input);
+        assert_eq!(result, "fs_read(/etc/*)");
+    }
+
+    #[test]
+    fn suggest_pattern_read_tool_with_path() {
+        let input = json!({"path": "/home/user/project/src/main.rs"});
+        let result = suggest_pattern("read_file", &input);
+        assert_eq!(result, "read_file(/home/user/project/src/*)");
+    }
+
+    #[test]
+    fn suggest_pattern_write_tool_with_path() {
+        let input = json!({"path": "/var/log/app.log"});
+        let result = suggest_pattern("write_file", &input);
+        assert_eq!(result, "write_file(/var/log/*)");
+    }
+
+    #[test]
+    fn suggest_pattern_file_tool_without_slash() {
+        // No directory separator — falls through to generic truncation
+        let input = json!({"path": "local_file.txt"});
+        let result = suggest_pattern("fs_write", &input);
+        assert_eq!(result, "fs_write(local_file.txt*)");
+    }
+
+    #[test]
+    fn suggest_pattern_no_primary_arg() {
+        let input = json!({"other_key": "value"});
+        let result = suggest_pattern("custom_tool", &input);
+        assert_eq!(result, "custom_tool");
+    }
+
+    #[test]
+    fn suggest_pattern_empty_object() {
+        let input = json!({});
+        let result = suggest_pattern("some_tool", &input);
+        assert_eq!(result, "some_tool");
+    }
+
+    #[test]
+    fn suggest_pattern_generic_tool_with_command() {
+        // Non-bash tool with a command argument — uses generic truncation
+        let input = json!({"command": "some-very-long-command-argument-here"});
+        let result = suggest_pattern("shell_exec", &input);
+        // Should truncate to 20 chars: "some-very-long-comma"
+        assert_eq!(result, "shell_exec(some-very-long-comma*)");
+    }
+
+    #[test]
+    fn suggest_pattern_short_generic_arg() {
+        let input = json!({"command": "echo hi"});
+        let result = suggest_pattern("run", &input);
+        assert_eq!(result, "run(echo hi*)");
+    }
+
+    #[test]
+    fn suggest_pattern_result_matches_original_call() {
+        // Verify that the suggested pattern always matches the original tool call
+        let cases = vec![
+            ("Bash", json!({"command": "npm install lodash"})),
+            ("Bash", json!({"command": "git status"})),
+            ("Bash", json!({"command": "ls -la"})),
+            ("fs_write", json!({"path": "/tmp/foo.txt"})),
+            ("fs_read", json!({"path": "/home/user/file.rs"})),
+            ("read_file", json!({"path": "/etc/config"})),
+        ];
+
+        for (tool_name, tool_input) in cases {
+            let suggestion = suggest_pattern(tool_name, &tool_input);
+            let pattern = agent_core::pattern::ToolPattern::parse(&suggestion)
+                .expect(&format!("Failed to parse suggestion: {}", suggestion));
+            assert!(
+                pattern.matches(tool_name, Some(&tool_input)),
+                "Suggested pattern '{}' does not match original call ({}, {:?})",
+                suggestion,
+                tool_name,
+                tool_input
+            );
+        }
+    }
+
+    #[test]
+    fn suggest_pattern_fallback_matches_tool_name() {
+        // When no primary arg, the suggestion is the exact tool name
+        let input = json!({"data": [1, 2, 3]});
+        let suggestion = suggest_pattern("my_tool", &input);
+        let pattern = agent_core::pattern::ToolPattern::parse(&suggestion).unwrap();
+        assert!(pattern.matches("my_tool", Some(&input)));
+    }
+
+    // --- PermissionPromptState tests ---
+
+    #[test]
+    fn prompt_state_defaults_to_awaiting_key() {
+        let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
+        let state = AppState::new(perms);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+    }
+
+    #[test]
+    fn prompt_state_reset_on_interruption() {
+        let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::Running;
+        // Simulate being in EditingPattern state from a previous prompt
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "Bash(npm*)".to_string(),
+            cursor: 5,
+        };
+
+        let pending = vec![PendingApproval {
+            tool_name: "shell".to_string(),
+            tool_input: json!({"command": "ls"}),
+            request_id: "req1".to_string(),
+        }];
+        state.update(AppEvent::AgentEvent(RunEvent::Interruption { pending }));
+
+        assert_eq!(state.mode, AppMode::PermissionPrompt);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+    }
+
+    #[test]
+    fn prompt_state_reset_on_approval_event() {
+        let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::Idle;
+        // Simulate leftover editing state
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "old_pattern".to_string(),
+            cursor: 3,
+        };
+
+        let request = ApprovalRequest {
+            agent_name: Some("sub-agent".to_string()),
+            pending: vec![PendingApproval {
+                tool_name: "Bash".to_string(),
+                tool_input: json!({"command": "npm install"}),
+                request_id: "req2".to_string(),
+            }],
+        };
+        state.update(AppEvent::ApprovalEvent(request));
+
+        assert_eq!(state.mode, AppMode::PermissionPrompt);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+    }
+
+    #[test]
+    fn prompt_state_reset_on_clear_approval() {
+        let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.approval_via_handler = true;
+        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "npm install"}),
+            request_id: "req3".to_string(),
+        }];
+
+        // Press 'y' to approve via handler path (while in AwaitingKey state)
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key));
+
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.mode, AppMode::Running);
+    }
+}
+
+#[cfg(test)]
+mod suggest_pattern_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ===================================================================
+    // Property 12: Pattern Suggestion Validity
+    //
+    // For any tool call (tool_name, tool_input), suggest_pattern always produces
+    // a string that, when parsed as a ToolPattern, matches the original tool call.
+    //
+    // **Validates: Requirements 8.3**
+    // ===================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn suggest_pattern_always_matches_original_call(
+            tool_name in prop_oneof![
+                Just("Bash".to_string()),
+                Just("fs_read".to_string()),
+                Just("fs_write".to_string()),
+                Just("read_file".to_string()),
+                Just("web_fetch".to_string()),
+                "[a-z][a-z_]{1,10}".prop_map(|s| s),
+            ],
+            arg_value in "[a-zA-Z0-9/_. -]{1,30}",
+            key in prop_oneof![
+                Just("command".to_string()),
+                Just("path".to_string()),
+                Just("url".to_string()),
+            ],
+        ) {
+            let tool_input = serde_json::json!({ key: arg_value });
+            let suggested = suggest_pattern(&tool_name, &tool_input);
+            let pattern = agent_core::pattern::ToolPattern::parse(&suggested)
+                .expect("suggest_pattern should always produce a parseable pattern");
+            prop_assert!(
+                pattern.matches(&tool_name, Some(&tool_input)),
+                "Pattern '{}' should match tool_name='{}' with input={}",
+                suggested, tool_name, tool_input
+            );
+        }
+    }
+
+    /// Test the no-primary-arg case separately: when tool_input has no recognized
+    /// primary argument key, suggest_pattern returns the tool name as-is,
+    /// which is a bare pattern that matches the tool name.
+    #[test]
+    fn suggest_pattern_no_primary_arg_matches() {
+        let cases = vec![
+            ("my_tool", serde_json::json!({"data": "value"})),
+            ("custom_op", serde_json::json!({"count": 42})),
+            ("analyzer", serde_json::json!({})),
+            ("Bash", serde_json::json!({"cwd": "/tmp"})), // no "command" key
+        ];
+
+        for (tool_name, tool_input) in &cases {
+            let suggested = suggest_pattern(tool_name, tool_input);
+            let pattern = agent_core::pattern::ToolPattern::parse(&suggested)
+                .expect(&format!(
+                    "suggest_pattern should produce a parseable pattern, got '{}'",
+                    suggested
+                ));
+            // For bare patterns (no primary arg), the pattern matches on tool name alone
+            assert!(
+                pattern.matches(tool_name, Some(tool_input)),
+                "Pattern '{}' should match tool_name='{}' with input={:?}",
+                suggested,
+                tool_name,
+                tool_input
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod p_key_handler_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use agent_core::{ApprovalResponse, PendingApproval, PermissionEngine, PermissionMode};
+    use serde_json::json;
+
+    fn make_prompt_state_with_tool(tool_name: &str, tool_input: serde_json::Value) -> AppState {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: tool_name.to_string(),
+            tool_input,
+            request_id: "req1".to_string(),
+        }];
+        state
+    }
+
+    // --- AwaitingKey → EditingPattern transition on 'p' key ---
+
+    #[test]
+    fn p_key_transitions_to_editing_pattern() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "npm install lodash"}));
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let result = state.update(AppEvent::Key(key));
+
+        assert_eq!(result, UpdateResult::Continue);
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                assert_eq!(edit_buffer, "Bash(npm*)");
+                assert_eq!(*cursor, "Bash(npm*)".len());
+            }
+            _ => panic!("Expected EditingPattern state after pressing 'p'"),
+        }
+    }
+
+    #[test]
+    fn p_key_with_no_approvals_stays_awaiting() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::AwaitingKey;
+        state.pending_approvals = vec![]; // no pending approvals
+
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let result = state.update(AppEvent::Key(key));
+
+        assert_eq!(result, UpdateResult::Continue);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+    }
+
+    // --- EditingPattern: Enter confirms and resolves ---
+
+    #[test]
+    fn editing_pattern_enter_resolves_legacy_path() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "cargo build"}));
+        state.approval_via_handler = false;
+
+        // Press 'p' to enter editing mode
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+
+        // Press Enter to confirm
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = state.update(AppEvent::Key(key_enter));
+
+        assert_eq!(result, UpdateResult::ResumeRun(true));
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert!(state.pending_approvals.is_empty());
+    }
+
+    #[test]
+    fn editing_pattern_enter_resolves_handler_path() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "npm test"}));
+        state.approval_via_handler = true;
+
+        // Press 'p' to enter editing mode
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+
+        // Press Enter to confirm
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = state.update(AppEvent::Key(key_enter));
+
+        match result {
+            UpdateResult::ResolveApproval(responses) => {
+                assert_eq!(responses.len(), 1);
+                assert_eq!(
+                    responses[0],
+                    ApprovalResponse::AlwaysAllow {
+                        pattern: "Bash(npm*)".to_string(),
+                    }
+                );
+            }
+            other => panic!("Expected ResolveApproval, got {:?}", other),
+        }
+    }
+
+    // --- EditingPattern: Esc cancels and returns to AwaitingKey ---
+
+    #[test]
+    fn editing_pattern_esc_returns_to_awaiting_key() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "git push"}));
+
+        // Press 'p' to enter editing mode
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+        assert!(matches!(state.prompt_state, PermissionPromptState::EditingPattern { .. }));
+
+        // Press Esc to cancel
+        let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let result = state.update(AppEvent::Key(key_esc));
+
+        assert_eq!(result, UpdateResult::Continue);
+        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey);
+        assert_eq!(state.mode, AppMode::PermissionPrompt); // still in prompt mode
+    }
+
+    // --- EditingPattern: character insertion ---
+
+    #[test]
+    fn editing_pattern_char_inserts_at_cursor() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "npm run build"}));
+
+        // Press 'p' to enter editing mode (cursor at end of "Bash(npm*)")
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+
+        // Type a character
+        let key_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_x));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                assert_eq!(edit_buffer, "Bash(npm*)x");
+                assert_eq!(*cursor, "Bash(npm*)x".len());
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    // --- EditingPattern: backspace ---
+
+    #[test]
+    fn editing_pattern_backspace_removes_char() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "npm install"}));
+
+        // Press 'p' → editing mode with "Bash(npm*)" cursor at end
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+
+        // Press backspace to remove the last char ')'
+        let key_bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_bs));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                assert_eq!(edit_buffer, "Bash(npm*");
+                assert_eq!(*cursor, "Bash(npm*".len());
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    #[test]
+    fn editing_pattern_backspace_at_start_does_nothing() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "hello".to_string(),
+            cursor: 0, // cursor at start
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_bs));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                assert_eq!(edit_buffer, "hello");
+                assert_eq!(*cursor, 0);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    // --- EditingPattern: delete ---
+
+    #[test]
+    fn editing_pattern_delete_removes_char_at_cursor() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "hello".to_string(),
+            cursor: 0,
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_del = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_del));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+                assert_eq!(edit_buffer, "ello");
+                assert_eq!(*cursor, 0);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    // --- EditingPattern: arrow keys ---
+
+    #[test]
+    fn editing_pattern_left_arrow_moves_cursor() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "abc".to_string(),
+            cursor: 3,
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_left));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { cursor, .. } => {
+                assert_eq!(*cursor, 2);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    #[test]
+    fn editing_pattern_right_arrow_moves_cursor() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "abc".to_string(),
+            cursor: 0,
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_right));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { cursor, .. } => {
+                assert_eq!(*cursor, 1);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    #[test]
+    fn editing_pattern_left_at_start_does_nothing() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "abc".to_string(),
+            cursor: 0,
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_left));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { cursor, .. } => {
+                assert_eq!(*cursor, 0);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    #[test]
+    fn editing_pattern_right_at_end_does_nothing() {
+        let perms = PermissionEngine::new(PermissionMode::Normal);
+        let mut state = AppState::new(perms);
+        state.mode = AppMode::PermissionPrompt;
+        state.prompt_state = PermissionPromptState::EditingPattern {
+            edit_buffer: "abc".to_string(),
+            cursor: 3,
+        };
+        state.pending_approvals = vec![PendingApproval {
+            tool_name: "test".to_string(),
+            tool_input: json!({}),
+            request_id: "req1".to_string(),
+        }];
+
+        let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_right));
+
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { cursor, .. } => {
+                assert_eq!(*cursor, 3);
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+    }
+
+    // --- Existing y/a/n behavior is preserved in AwaitingKey ---
+
+    #[test]
+    fn y_a_n_still_work_in_awaiting_key() {
+        // 'y' still allows once
+        let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(true));
+
+        // 'a' still grants session allow
+        let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(true));
+
+        // 'n' still denies
+        let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(false));
+    }
+
+    // --- Editing and confirming actually grants session allow ---
+
+    #[test]
+    fn editing_pattern_confirm_grants_session_allow() {
+        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "cargo test"}));
+        state.approval_via_handler = false;
+
+        // Press 'p' to enter editing mode
+        let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_p));
+
+        // The suggested pattern should be "Bash(cargo*)"
+        match &state.prompt_state {
+            PermissionPromptState::EditingPattern { edit_buffer, .. } => {
+                assert_eq!(edit_buffer, "Bash(cargo*)");
+            }
+            _ => panic!("Expected EditingPattern state"),
+        }
+
+        // Confirm with Enter
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        state.update(AppEvent::Key(key_enter));
+
+        // Verify the session allow was granted: a subsequent "cargo build" call should be allowed
+        let check_input = json!({"command": "cargo build --release"});
+        assert!(state.permissions.has_session_allow("Bash", Some(&check_input)));
     }
 }

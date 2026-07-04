@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use agent_core::error::ToolError;
-use agent_core::tool::{Concurrency, Tool, ToolContext, ToolOutput};
+use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 /// A tool that writes content to files.
 ///
@@ -64,6 +64,10 @@ impl Tool for FileWriteTool {
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(30)
+    }
+
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Always
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> Result<ToolOutput, ToolError> {

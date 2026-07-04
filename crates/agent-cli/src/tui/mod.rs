@@ -1,4 +1,5 @@
 pub mod app;
+pub mod approval;
 pub mod event_loop;
 pub mod input;
 pub mod render;
@@ -11,14 +12,16 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use tokio::sync::mpsc;
 
 use agent_core::{
-    run_stream, Agent, ContentBlock, Input, Message, PermissionEngine, PermissionMode, RunConfig,
-    Tool,
+    run_stream, Agent, ApprovalResponse, ContentBlock, Input, Message, PermissionEngine,
+    PermissionMode, RunConfig, Tool,
 };
 use agent_llm::UnifiedProvider;
 
 use self::app::{AppMode, AppState, OutputSpan, SpanStyle, UpdateResult};
+use self::approval::InteractiveApprovalHandler;
 use self::event_loop::spawn_event_sources;
 
 /// Run the interactive TUI REPL.
@@ -45,138 +48,169 @@ pub async fn run_tui_repl(
         original_hook(panic_info);
     }));
 
+    // Create approval channels for the InteractiveApprovalHandler
+    let (approval_req_tx, mut approval_req_rx) = mpsc::channel::<approval::ApprovalRequest>(1);
+    let (approval_resp_tx, approval_resp_rx) = mpsc::channel::<Vec<ApprovalResponse>>(1);
+    let approval_handler: Arc<dyn agent_core::ApprovalHandler> =
+        Arc::new(InteractiveApprovalHandler::new(approval_req_tx, approval_resp_rx));
+
     // Initialize application state with permission engine
     let permissions = PermissionEngine::new(PermissionMode::Normal);
     let mut state = AppState::new(permissions.clone());
 
     // Spawn initial event sources (terminal-only, no RunStream yet)
-    let (mut event_rx, event_sources) = spawn_event_sources(None);
+    let (mut event_rx, event_sources) = spawn_event_sources(None, None);
     let mut event_sources = Some(event_sources);
-
     // Main event loop
     loop {
         // Render current state
         terminal.draw(|f| render::draw(f, &state))?;
 
-        // Wait for next event
-        match event_rx.recv().await {
-            Some(event) => {
-                let result = state.update(event);
-                match result {
-                    UpdateResult::Continue => {}
-                    UpdateResult::StartRun(prompt) => {
-                        // Display user prompt in the output area
-                        state.output_buffer.push(OutputSpan {
-                            text: format!("\n> {}\n\n", prompt),
-                            style: SpanStyle::User,
-                        });
-
-                        // Push user message to conversation history
-                        state.history.push(Message::User {
-                            content: vec![ContentBlock::Text { text: prompt }],
-                        });
-                        state.mode = AppMode::Running;
-
-                        // Build agent
-                        let mut builder = Agent::builder("arlo");
-                        for tool in &tools {
-                            builder = builder.tool(tool.clone());
-                        }
-                        let agent = builder.build();
-
-                        // Build run config
-                        let config = RunConfig::builder(provider.clone(), model)
-                            .permissions(state.permissions.clone())
-                            .build();
-
-                        // Create run stream with full conversation history
-                        let input = Input::Items {
-                            messages: state.history.clone(),
-                        };
-                        let stream = run_stream(&agent, input, &config);
-
-                        // Abort previous event sources and spawn new ones with stream
-                        if let Some(sources) = event_sources.take() {
-                            sources.terminal_handle.abort();
-                            if let Some(h) = sources.stream_handle {
-                                h.abort();
-                            }
-                        }
-                        let (new_rx, new_sources) = spawn_event_sources(Some(stream));
-                        event_rx = new_rx;
-                        event_sources = Some(new_sources);
-                    }
-                    UpdateResult::ResumeRun(approved) => {
-                        state.mode = AppMode::Running;
-
-                        if !approved {
-                            // Append denial as tool results in history
-                            for approval in &state.pending_approvals {
-                                state.history.push(Message::ToolResult {
-                                    tool_use_id: approval.request_id.clone(),
-                                    content: format!(
-                                        "Permission denied by user for tool '{}'",
-                                        approval.tool_name
-                                    ),
-                                    is_error: true,
-                                });
-                            }
-                        }
-
-                        state.pending_approvals.clear();
-
-                        // Build agent
-                        let mut builder = Agent::builder("arlo");
-                        for tool in &tools {
-                            builder = builder.tool(tool.clone());
-                        }
-                        let agent = builder.build();
-
-                        // Build run config
-                        let config = RunConfig::builder(provider.clone(), model)
-                            .permissions(state.permissions.clone())
-                            .build();
-
-                        // Create new run stream to resume
-                        let input = Input::Items {
-                            messages: state.history.clone(),
-                        };
-                        let stream = run_stream(&agent, input, &config);
-
-                        // Abort previous event sources and spawn new ones with stream
-                        if let Some(sources) = event_sources.take() {
-                            sources.terminal_handle.abort();
-                            if let Some(h) = sources.stream_handle {
-                                h.abort();
-                            }
-                        }
-                        let (new_rx, new_sources) = spawn_event_sources(Some(stream));
-                        event_rx = new_rx;
-                        event_sources = Some(new_sources);
-                    }
-                    UpdateResult::AbortRun => {
-                        // Abort by dropping the stream handles
-                        if let Some(sources) = event_sources.take() {
-                            sources.terminal_handle.abort();
-                            if let Some(h) = sources.stream_handle {
-                                h.abort();
-                            }
-                        }
-                        state.mode = AppMode::Idle;
-                        state.output_buffer.push(OutputSpan {
-                            text: "\nRun cancelled.\n".to_string(),
-                            style: SpanStyle::System,
-                        });
-
-                        // Re-spawn terminal-only event sources (no RunStream)
-                        let (new_rx, new_sources) = spawn_event_sources(None);
-                        event_rx = new_rx;
-                        event_sources = Some(new_sources);
-                    }
-                    UpdateResult::Exit => break,
+        // Wait for next event — multiplex between event sources and approval requests
+        let event = tokio::select! {
+            ev = event_rx.recv() => {
+                match ev {
+                    Some(e) => e,
+                    None => break, // channel closed
                 }
             }
-            None => break, // channel closed
+            req = approval_req_rx.recv() => {
+                match req {
+                    Some(request) => app::AppEvent::ApprovalEvent(request),
+                    None => continue, // approval channel closed, ignore
+                }
+            }
+        };
+
+        let result = state.update(event);
+        match result {
+            UpdateResult::Continue => {}
+            UpdateResult::StartRun(prompt) => {
+                // Display user prompt in the output area
+                state.output_buffer.push(OutputSpan {
+                    text: format!("\n> {}\n\n", prompt),
+                    style: SpanStyle::User,
+                });
+
+                // Push user message to conversation history
+                state.history.push(Message::User {
+                    content: vec![ContentBlock::Text { text: prompt }],
+                });
+                state.mode = AppMode::Running;
+
+                // Build agent
+                let mut builder = Agent::builder("arlo");
+                for tool in &tools {
+                    builder = builder.tool(tool.clone());
+                }
+                let agent = builder.build();
+
+                // Build run config with approval handler
+                let config = RunConfig::builder(provider.clone(), model)
+                    .permissions(state.permissions.clone())
+                    .approval_handler(approval_handler.clone())
+                    .build();
+
+                // Create run stream with full conversation history
+                let input = Input::Items {
+                    messages: state.history.clone(),
+                };
+                let stream = run_stream(&agent, input, &config);
+
+                // Abort previous event sources and spawn new ones with stream
+                if let Some(sources) = event_sources.take() {
+                    sources.terminal_handle.abort();
+                    if let Some(h) = sources.stream_handle {
+                        h.abort();
+                    }
+                    if let Some(h) = sources.approval_handle {
+                        h.abort();
+                    }
+                }
+                let (new_rx, new_sources) = spawn_event_sources(Some(stream), None);
+                event_rx = new_rx;
+                event_sources = Some(new_sources);
+            }
+            UpdateResult::ResumeRun(approved) => {
+                state.mode = AppMode::Running;
+
+                if !approved {
+                    // Append denial as tool results in history
+                    for approval in &state.pending_approvals {
+                        state.history.push(Message::ToolResult {
+                            tool_use_id: approval.request_id.clone(),
+                            content: format!(
+                                "Permission denied by user for tool '{}'",
+                                approval.tool_name
+                            ),
+                            is_error: true,
+                        });
+                    }
+                }
+
+                state.pending_approvals.clear();
+
+                // Build agent
+                let mut builder = Agent::builder("arlo");
+                for tool in &tools {
+                    builder = builder.tool(tool.clone());
+                }
+                let agent = builder.build();
+
+                // Build run config with approval handler
+                let config = RunConfig::builder(provider.clone(), model)
+                    .permissions(state.permissions.clone())
+                    .approval_handler(approval_handler.clone())
+                    .build();
+
+                // Create new run stream to resume
+                let input = Input::Items {
+                    messages: state.history.clone(),
+                };
+                let stream = run_stream(&agent, input, &config);
+
+                // Abort previous event sources and spawn new ones with stream
+                if let Some(sources) = event_sources.take() {
+                    sources.terminal_handle.abort();
+                    if let Some(h) = sources.stream_handle {
+                        h.abort();
+                    }
+                    if let Some(h) = sources.approval_handle {
+                        h.abort();
+                    }
+                }
+                let (new_rx, new_sources) = spawn_event_sources(Some(stream), None);
+                event_rx = new_rx;
+                event_sources = Some(new_sources);
+            }
+            UpdateResult::ResolveApproval(responses) => {
+                // Send responses back to the InteractiveApprovalHandler via channel.
+                // The run continues automatically — no need to restart the stream.
+                let _ = approval_resp_tx.send(responses).await;
+            }
+            UpdateResult::AbortRun => {
+                // Abort by dropping the stream handles
+                if let Some(sources) = event_sources.take() {
+                    sources.terminal_handle.abort();
+                    if let Some(h) = sources.stream_handle {
+                        h.abort();
+                    }
+                    if let Some(h) = sources.approval_handle {
+                        h.abort();
+                    }
+                }
+                state.mode = AppMode::Idle;
+                state.output_buffer.push(OutputSpan {
+                    text: "\nRun cancelled.\n".to_string(),
+                    style: SpanStyle::System,
+                });
+
+                // Re-spawn terminal-only event sources (no RunStream)
+                let (new_rx, new_sources) = spawn_event_sources(None, None);
+                event_rx = new_rx;
+                event_sources = Some(new_sources);
+            }
+            UpdateResult::Exit => break,
         }
     }
 
