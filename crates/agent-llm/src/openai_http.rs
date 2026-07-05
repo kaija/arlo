@@ -64,14 +64,20 @@ impl OpenAIHttpModel {
             body["stream_options"] = json!({"include_usage": true});
         }
 
-        if let Some(max_tokens) = request.max_tokens {
-            body["max_tokens"] = json!(max_tokens);
-        } else {
-            body["max_tokens"] = json!(4096);
-        }
+        // Use max_completion_tokens (the current OpenAI standard).
+        // The legacy "max_tokens" param is deprecated and rejected by newer models.
+        let token_limit = request.max_tokens.unwrap_or(4096);
+        body["max_completion_tokens"] = json!(token_limit);
 
+        // Reasoning models (o-series) don't support temperature — skip it for those.
         if let Some(temp) = request.temperature {
-            body["temperature"] = json!(temp);
+            let name = self.model_name.to_lowercase();
+            let is_reasoning = name.starts_with("o1")
+                || name.starts_with("o3")
+                || name.starts_with("o4");
+            if !is_reasoning {
+                body["temperature"] = json!(temp);
+            }
         }
 
         // Add tools if present

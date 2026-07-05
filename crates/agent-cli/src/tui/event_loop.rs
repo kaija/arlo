@@ -10,34 +10,27 @@ use tokio::task::JoinHandle;
 use agent_core::RunStream;
 
 use super::app::AppEvent;
-use super::approval::ApprovalRequest;
 
-/// Handle to event sources that can be stopped by aborting the join handles.
-pub struct EventSources {
-    /// Handle for the terminal event polling task.
-    pub terminal_handle: JoinHandle<()>,
-    /// Handle for the RunStream forwarding task (if active).
-    pub stream_handle: Option<JoinHandle<()>>,
-    /// Handle for the approval request forwarding task (if active).
-    pub approval_handle: Option<JoinHandle<()>>,
+/// A persistent terminal event poller that lives for the entire session.
+///
+/// Unlike stream tasks (which are per-run), the terminal poller is created once
+/// and sends key/resize events through a long-lived channel. This avoids the race
+/// condition where aborting and re-spawning a blocking poll task can eat key events
+/// that arrive during the transition window.
+pub struct TerminalPoller {
+    /// Handle to the blocking poll task (aborted only on app exit).
+    pub handle: JoinHandle<()>,
 }
 
-/// Spawn event source tasks and return a receiver for AppEvents.
+/// Spawn the terminal polling task. Call once at session start.
 ///
-/// - Spawns a blocking task that polls crossterm at ~30fps (33ms poll timeout)
-/// - If a RunStream is provided, spawns an async task to forward its events
-/// - If an approval_rx is provided, spawns an async task to forward approval requests
-///
-/// Returns (event_receiver, event_sources)
-pub fn spawn_event_sources(
-    run_stream: Option<RunStream>,
-    approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
-) -> (mpsc::UnboundedReceiver<AppEvent>, EventSources) {
+/// Returns (event_sender, poller) — the sender is shared with stream tasks so
+/// all events flow into a single receiver in the main loop.
+pub fn spawn_terminal_poller() -> (mpsc::UnboundedSender<AppEvent>, mpsc::UnboundedReceiver<AppEvent>, TerminalPoller) {
     let (tx, rx) = mpsc::unbounded_channel();
 
-    // Terminal input polling task (blocking)
     let term_tx = tx.clone();
-    let terminal_handle = tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || {
         loop {
             if event::poll(Duration::from_millis(33)).unwrap_or(false) {
                 if let Ok(evt) = event::read() {
@@ -56,30 +49,29 @@ pub fn spawn_event_sources(
         }
     });
 
-    // RunStream forwarding task (async)
-    let stream_handle = run_stream.map(|stream| {
-        let stream_tx = tx.clone();
-        tokio::spawn(async move {
-            futures::pin_mut!(stream);
-            while let Some(event) = stream.next().await {
-                if stream_tx.send(AppEvent::AgentEvent(event)).is_err() {
-                    break;
-                }
+    (tx, rx, TerminalPoller { handle })
+}
+
+/// Handle to a RunStream forwarding task (per-run, abortable).
+pub struct StreamForwarder {
+    pub handle: JoinHandle<()>,
+}
+
+/// Spawn a RunStream forwarding task that sends agent events into the shared channel.
+///
+/// The returned handle can be aborted when the run is cancelled.
+pub fn spawn_stream_forwarder(
+    stream: RunStream,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) -> StreamForwarder {
+    let handle = tokio::spawn(async move {
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            if tx.send(AppEvent::AgentEvent(event)).is_err() {
+                break;
             }
-        })
+        }
     });
 
-    // Approval request forwarding task (async)
-    let approval_handle = approval_rx.map(|mut rx| {
-        let approval_tx = tx;
-        tokio::spawn(async move {
-            while let Some(request) = rx.recv().await {
-                if approval_tx.send(AppEvent::ApprovalEvent(request)).is_err() {
-                    break;
-                }
-            }
-        })
-    });
-
-    (rx, EventSources { terminal_handle, stream_handle, approval_handle })
+    StreamForwarder { handle }
 }

@@ -108,11 +108,32 @@ fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
         .title(" Output ");
 
     // Calculate scroll offset to auto-scroll to bottom.
-    // The visible height is the area height minus the block border (0 since NONE).
+    // We must account for line wrapping: each logical line may occupy multiple
+    // visual lines when wrapped. Using only `text.lines.len()` would undercount
+    // and cause the scroll to be insufficient to show the latest content.
     let visible_height = area.height as usize;
-    let total_lines = text.lines.len();
-    let scroll_offset = if total_lines > visible_height {
-        (total_lines - visible_height) as u16
+    let wrap_width = area.width as usize;
+    let total_visual_lines: usize = text
+        .lines
+        .iter()
+        .map(|line| {
+            if wrap_width == 0 {
+                return 1;
+            }
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| display_width(&s.content))
+                .sum();
+            if line_width == 0 {
+                1
+            } else {
+                (line_width + wrap_width - 1) / wrap_width // ceil division
+            }
+        })
+        .sum();
+    let scroll_offset = if total_visual_lines > visible_height {
+        (total_visual_lines - visible_height) as u16
     } else {
         0
     };
@@ -343,12 +364,21 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Convert a byte-offset cursor position to a column offset (character count).
+/// Convert a byte-offset cursor position to a display column offset.
 ///
-/// This counts the number of characters in `content[..byte_pos]` to determine
-/// the visual column where the cursor should appear.
+/// This accounts for Unicode display width: CJK characters occupy 2 terminal
+/// columns, while ASCII and most other characters occupy 1 column.
 fn cursor_byte_to_column(content: &str, byte_pos: usize) -> usize {
-    content[..byte_pos].chars().count()
+    display_width(&content[..byte_pos])
+}
+
+/// Calculate the terminal display width of a string.
+///
+/// CJK (wide) characters count as 2 columns; other characters count as 1.
+/// Control characters count as 0.
+fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
 }
 
 #[cfg(test)]
@@ -414,12 +444,12 @@ mod tests {
 
     #[test]
     fn cursor_byte_to_column_multibyte() {
-        // "あいう" — each char is 3 bytes
+        // "あいう" — each char is 3 bytes, 2 display columns (CJK wide)
         let s = "あいう";
         assert_eq!(cursor_byte_to_column(s, 0), 0);
-        assert_eq!(cursor_byte_to_column(s, 3), 1);
-        assert_eq!(cursor_byte_to_column(s, 6), 2);
-        assert_eq!(cursor_byte_to_column(s, 9), 3);
+        assert_eq!(cursor_byte_to_column(s, 3), 2);  // after 'あ' = 2 cols
+        assert_eq!(cursor_byte_to_column(s, 6), 4);  // after 'い' = 4 cols
+        assert_eq!(cursor_byte_to_column(s, 9), 6);  // after 'う' = 6 cols
     }
 
     #[test]

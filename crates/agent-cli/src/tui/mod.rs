@@ -22,7 +22,7 @@ use agent_llm::UnifiedProvider;
 
 use self::app::{AppMode, AppState, OutputSpan, SpanStyle, UpdateResult};
 use self::approval::InteractiveApprovalHandler;
-use self::event_loop::spawn_event_sources;
+use self::event_loop::{spawn_stream_forwarder, spawn_terminal_poller, StreamForwarder};
 
 /// Run the interactive TUI REPL.
 ///
@@ -58,9 +58,14 @@ pub async fn run_tui_repl(
     let permissions = PermissionEngine::new(PermissionMode::Normal);
     let mut state = AppState::new(permissions.clone());
 
-    // Spawn initial event sources (terminal-only, no RunStream yet)
-    let (mut event_rx, event_sources) = spawn_event_sources(None, None);
-    let mut event_sources = Some(event_sources);
+    // Spawn the terminal poller ONCE — it lives for the entire session.
+    // This avoids the race condition where aborting/re-spawning a blocking
+    // terminal reader can eat key events during the transition.
+    let (event_tx, mut event_rx, _terminal_poller) = spawn_terminal_poller();
+
+    // Track the current stream forwarder (per-run, abortable)
+    let mut stream_forwarder: Option<StreamForwarder> = None;
+
     // Main event loop
     loop {
         // Render current state
@@ -71,7 +76,7 @@ pub async fn run_tui_repl(
             ev = event_rx.recv() => {
                 match ev {
                     Some(e) => e,
-                    None => break, // channel closed
+                    None => break, // channel closed (terminal poller exited)
                 }
             }
             req = approval_req_rx.recv() => {
@@ -117,19 +122,12 @@ pub async fn run_tui_repl(
                 };
                 let stream = run_stream(&agent, input, &config);
 
-                // Abort previous event sources and spawn new ones with stream
-                if let Some(sources) = event_sources.take() {
-                    sources.terminal_handle.abort();
-                    if let Some(h) = sources.stream_handle {
-                        h.abort();
-                    }
-                    if let Some(h) = sources.approval_handle {
-                        h.abort();
-                    }
+                // Abort previous stream forwarder (if any) and spawn a new one.
+                // The terminal poller stays running — no abort/respawn needed.
+                if let Some(fwd) = stream_forwarder.take() {
+                    fwd.handle.abort();
                 }
-                let (new_rx, new_sources) = spawn_event_sources(Some(stream), None);
-                event_rx = new_rx;
-                event_sources = Some(new_sources);
+                stream_forwarder = Some(spawn_stream_forwarder(stream, event_tx.clone()));
             }
             UpdateResult::ResumeRun(approved) => {
                 state.mode = AppMode::Running;
@@ -169,19 +167,11 @@ pub async fn run_tui_repl(
                 };
                 let stream = run_stream(&agent, input, &config);
 
-                // Abort previous event sources and spawn new ones with stream
-                if let Some(sources) = event_sources.take() {
-                    sources.terminal_handle.abort();
-                    if let Some(h) = sources.stream_handle {
-                        h.abort();
-                    }
-                    if let Some(h) = sources.approval_handle {
-                        h.abort();
-                    }
+                // Abort previous stream forwarder and spawn new one
+                if let Some(fwd) = stream_forwarder.take() {
+                    fwd.handle.abort();
                 }
-                let (new_rx, new_sources) = spawn_event_sources(Some(stream), None);
-                event_rx = new_rx;
-                event_sources = Some(new_sources);
+                stream_forwarder = Some(spawn_stream_forwarder(stream, event_tx.clone()));
             }
             UpdateResult::ResolveApproval(responses) => {
                 // Send responses back to the InteractiveApprovalHandler via channel.
@@ -189,26 +179,15 @@ pub async fn run_tui_repl(
                 let _ = approval_resp_tx.send(responses).await;
             }
             UpdateResult::AbortRun => {
-                // Abort by dropping the stream handles
-                if let Some(sources) = event_sources.take() {
-                    sources.terminal_handle.abort();
-                    if let Some(h) = sources.stream_handle {
-                        h.abort();
-                    }
-                    if let Some(h) = sources.approval_handle {
-                        h.abort();
-                    }
+                // Abort by dropping the stream forwarder
+                if let Some(fwd) = stream_forwarder.take() {
+                    fwd.handle.abort();
                 }
                 state.mode = AppMode::Idle;
                 state.output_buffer.push(OutputSpan {
                     text: "\nRun cancelled.\n".to_string(),
                     style: SpanStyle::System,
                 });
-
-                // Re-spawn terminal-only event sources (no RunStream)
-                let (new_rx, new_sources) = spawn_event_sources(None, None);
-                event_rx = new_rx;
-                event_sources = Some(new_sources);
             }
             UpdateResult::Exit => break,
         }
