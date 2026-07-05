@@ -107,41 +107,22 @@ fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::NONE)
         .title(" Output ");
 
-    // Calculate scroll offset to auto-scroll to bottom.
-    // We must account for line wrapping: each logical line may occupy multiple
-    // visual lines when wrapped. Using only `text.lines.len()` would undercount
-    // and cause the scroll to be insufficient to show the latest content.
+    // Use Paragraph::line_count() to get the exact number of visual lines
+    // after word-wrapping. This matches the renderer's internal calculation
+    // and avoids the naive character-width estimation drifting out of sync.
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
     let visible_height = area.height as usize;
-    let wrap_width = area.width as usize;
-    let total_visual_lines: usize = text
-        .lines
-        .iter()
-        .map(|line| {
-            if wrap_width == 0 {
-                return 1;
-            }
-            let line_width: usize = line
-                .spans
-                .iter()
-                .map(|s| display_width(&s.content))
-                .sum();
-            if line_width == 0 {
-                1
-            } else {
-                (line_width + wrap_width - 1) / wrap_width // ceil division
-            }
-        })
-        .sum();
+    let total_visual_lines = paragraph.line_count(area.width);
     let scroll_offset = if total_visual_lines > visible_height {
         (total_visual_lines - visible_height) as u16
     } else {
         0
     };
 
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0));
+    let paragraph = paragraph.scroll((scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
 }

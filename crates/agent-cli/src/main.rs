@@ -11,12 +11,13 @@
 
 mod tui;
 
+use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
 use agent_core::{
-    run, Agent, DenyAllApprovalHandler, Input, ModelProvider, PermissionEngine, PermissionMode,
-    RunConfig, Tool,
+    run, Agent, DenyAllApprovalHandler, Input, Instructions, ModelProvider, PermissionEngine,
+    PermissionMode, RunConfig, SkillRegistry, SkillTool, Tool,
 };
 use agent_llm::UnifiedProvider;
 use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
@@ -108,6 +109,53 @@ fn default_tools() -> Vec<Arc<dyn Tool>> {
     tools
 }
 
+/// Discover the project-level skills directory.
+///
+/// Looks for `.arlo/skills/` in the current working directory.
+fn project_skills_dir() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let dir = cwd.join(".arlo").join("skills");
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Discover the user-level skills directory.
+///
+/// Looks for `~/.arlo/skills/`.
+fn user_skills_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".arlo").join("skills");
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Load skills from project-level and user-level directories, returning
+/// the registry and the skill tools ready for registration.
+fn load_skills() -> (SkillRegistry, Vec<Arc<dyn Tool>>) {
+    let project_dir = project_skills_dir();
+    let user_dir = user_skills_dir();
+
+    let registry = SkillRegistry::load(
+        project_dir.as_deref(),
+        user_dir.as_deref(),
+    );
+
+    let skill_tools: Vec<Arc<dyn Tool>> = registry
+        .skills()
+        .iter()
+        .cloned()
+        .map(|skill| Arc::new(SkillTool::new(skill)) as Arc<dyn Tool>)
+        .collect();
+
+    (registry, skill_tools)
+}
+
 /// Determine the model name to use.
 ///
 /// Priority: --model flag > default from provider (first available).
@@ -143,10 +191,10 @@ async fn run_single_prompt(
     provider: Arc<UnifiedProvider>,
     model: &str,
     prompt: &str,
+    tools: Vec<Arc<dyn Tool>>,
+    instructions: Instructions,
 ) -> Result<String, String> {
-    let tools = default_tools();
-
-    let mut builder = Agent::builder("arlo");
+    let mut builder = Agent::builder("arlo").instructions(instructions);
     for tool in tools {
         builder = builder.tool(tool);
     }
@@ -196,11 +244,26 @@ async fn main() {
     // Resolve the model name
     let model = resolve_model_name(model_override, &provider);
 
+    // Load skills from .arlo/skills/ directories
+    let (skill_registry, skill_tools) = load_skills();
+
+    // Build the combined tools list (built-in + skills)
+    let mut tools = default_tools();
+    tools.extend(skill_tools);
+
+    // Build instructions including available skills
+    let skill_prompt = skill_registry.system_prompt_section();
+    let instructions = if skill_prompt.is_empty() {
+        Instructions::Static(String::new())
+    } else {
+        Instructions::Static(skill_prompt)
+    };
+
     // Dispatch to single-prompt or REPL mode
     match prompt {
         Some(prompt_text) => {
             // Single-prompt mode: run, print, exit
-            match run_single_prompt(provider, &model, &prompt_text).await {
+            match run_single_prompt(provider, &model, &prompt_text, tools, instructions).await {
                 Ok(output) => {
                     println!("{}", output);
                 }
@@ -212,7 +275,7 @@ async fn main() {
         }
         None => {
             // Interactive TUI REPL mode
-            if let Err(e) = tui::run_tui_repl(provider, &model, default_tools()).await {
+            if let Err(e) = tui::run_tui_repl(provider, &model, tools, instructions).await {
                 eprintln!("{}", e);
                 process::exit(1);
             }

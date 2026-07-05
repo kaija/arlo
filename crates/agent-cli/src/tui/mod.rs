@@ -15,8 +15,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
 use agent_core::{
-    run_stream, Agent, ApprovalResponse, ContentBlock, Input, Message, PermissionEngine,
-    PermissionMode, RunConfig, Tool,
+    run_stream, Agent, ApprovalResponse, ContentBlock, Input, Instructions, Message,
+    PermissionEngine, PermissionMode, RunConfig, Tool,
 };
 use agent_llm::UnifiedProvider;
 
@@ -32,6 +32,7 @@ pub async fn run_tui_repl(
     provider: Arc<UnifiedProvider>,
     model: &str,
     tools: Vec<Arc<dyn Tool>>,
+    instructions: Instructions,
 ) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -104,7 +105,8 @@ pub async fn run_tui_repl(
                 state.mode = AppMode::Running;
 
                 // Build agent
-                let mut builder = Agent::builder("arlo");
+                let mut builder = Agent::builder("arlo")
+                    .instructions(instructions.clone());
                 for tool in &tools {
                     builder = builder.tool(tool.clone());
                 }
@@ -149,7 +151,8 @@ pub async fn run_tui_repl(
                 state.pending_approvals.clear();
 
                 // Build agent
-                let mut builder = Agent::builder("arlo");
+                let mut builder = Agent::builder("arlo")
+                    .instructions(instructions.clone());
                 for tool in &tools {
                     builder = builder.tool(tool.clone());
                 }

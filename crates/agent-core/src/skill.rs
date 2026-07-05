@@ -181,8 +181,10 @@ pub struct SkillRegistry {
 impl SkillRegistry {
     /// Load skills from project-level and user-level directories.
     ///
-    /// Project-level skills (from `.agent/skills/`) take precedence over
-    /// user-level skills (`~/.agent/skills/`) when names conflict.
+    /// Project-level skills (from `.arlo/skills/`) take precedence over
+    /// user-level skills (`~/.arlo/skills/`) when names conflict.
+    ///
+    /// Skills are expected in subdirectory format: `skills/<skill-name>/SKILL.md`
     pub fn load(project_dir: Option<&Path>, user_dir: Option<&Path>) -> Self {
         let mut registry = SkillRegistry { skills: Vec::new() };
 
@@ -199,7 +201,14 @@ impl SkillRegistry {
         registry
     }
 
-    /// Load all SKILL.md files from a directory.
+    /// Load skills from a directory.
+    ///
+    /// Supports two layouts:
+    /// 1. **Subdirectory format** (preferred): `<dir>/<skill-name>/SKILL.md`
+    /// 2. **Flat format** (legacy): `<dir>/<name>.md`
+    ///
+    /// Subdirectory format matches the convention used by claude-code and the
+    /// `.arlo/skills/` layout on disk.
     fn load_from_directory(&mut self, dir: &Path, make_source: impl Fn(&Path) -> SkillSource) {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -208,10 +217,32 @@ impl SkillRegistry {
 
         for entry in entries.flatten() {
             let path = entry.path();
+
+            // Subdirectory format: <dir>/<skill-name>/SKILL.md
+            if path.is_dir() {
+                let skill_file = path.join("SKILL.md");
+                if skill_file.is_file() {
+                    let content = match std::fs::read_to_string(&skill_file) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("Failed to read skill file {:?}: {}", skill_file, e);
+                            continue;
+                        }
+                    };
+
+                    let source = make_source(&skill_file);
+                    if let Some(skill) = parse_skill_file(&content, &skill_file, source) {
+                        self.skills.retain(|s| s.name != skill.name);
+                        self.skills.push(skill);
+                    }
+                }
+                continue;
+            }
+
+            // Flat format (legacy): <dir>/<name>.md
             if !path.is_file() {
                 continue;
             }
-            // Accept files ending in .md within the skills directory
             let file_name = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -571,6 +602,70 @@ mod tests {
         assert_eq!(registry.skills().len(), 2);
         assert!(registry.find("code-review").is_some());
         assert!(registry.find("refactor").is_some());
+    }
+
+    #[test]
+    fn registry_load_subdirectory_format() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path();
+
+        // Create skill in subdirectory format: <skills_dir>/code-review/SKILL.md
+        let skill_subdir = skills_dir.join("code-review");
+        fs::create_dir_all(&skill_subdir).unwrap();
+        fs::write(skill_subdir.join("SKILL.md"), sample_skill_md()).unwrap();
+
+        // Create another skill in subdirectory format
+        let refactor_subdir = skills_dir.join("refactor");
+        fs::create_dir_all(&refactor_subdir).unwrap();
+        fs::write(refactor_subdir.join("SKILL.md"), fork_skill_md()).unwrap();
+
+        let registry = SkillRegistry::load(Some(skills_dir), None);
+        assert_eq!(registry.skills().len(), 2);
+        assert!(registry.find("code-review").is_some());
+        assert!(registry.find("refactor").is_some());
+
+        // Verify base_dir points to the skill subdirectory (not the SKILL.md file)
+        let skill = registry.find("code-review").unwrap();
+        assert_eq!(skill.base_dir, skill_subdir);
+    }
+
+    #[test]
+    fn registry_load_mixed_formats() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path();
+
+        // Subdirectory format
+        let skill_subdir = skills_dir.join("code-review");
+        fs::create_dir_all(&skill_subdir).unwrap();
+        fs::write(skill_subdir.join("SKILL.md"), sample_skill_md()).unwrap();
+
+        // Flat format
+        fs::write(skills_dir.join("refactor.md"), fork_skill_md()).unwrap();
+
+        let registry = SkillRegistry::load(Some(skills_dir), None);
+        assert_eq!(registry.skills().len(), 2);
+        assert!(registry.find("code-review").is_some());
+        assert!(registry.find("refactor").is_some());
+    }
+
+    #[test]
+    fn registry_subdirectory_without_skill_md_is_skipped() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path();
+
+        // Directory without SKILL.md should be ignored
+        let empty_subdir = skills_dir.join("empty-skill");
+        fs::create_dir_all(&empty_subdir).unwrap();
+        fs::write(empty_subdir.join("README.md"), "not a skill").unwrap();
+
+        // Valid subdirectory skill
+        let valid_subdir = skills_dir.join("code-review");
+        fs::create_dir_all(&valid_subdir).unwrap();
+        fs::write(valid_subdir.join("SKILL.md"), sample_skill_md()).unwrap();
+
+        let registry = SkillRegistry::load(Some(skills_dir), None);
+        assert_eq!(registry.skills().len(), 1);
+        assert!(registry.find("code-review").is_some());
     }
 
     #[test]
