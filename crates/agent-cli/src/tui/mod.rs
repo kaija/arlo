@@ -33,6 +33,7 @@ pub async fn run_tui_repl(
     model: &str,
     tools: Vec<Arc<dyn Tool>>,
     instructions: Instructions,
+    permission_mode: PermissionMode,
 ) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -56,7 +57,7 @@ pub async fn run_tui_repl(
         Arc::new(InteractiveApprovalHandler::new(approval_req_tx, approval_resp_rx));
 
     // Initialize application state with permission engine
-    let permissions = PermissionEngine::new(PermissionMode::Normal);
+    let permissions = PermissionEngine::new(permission_mode);
     let mut state = AppState::new(permissions.clone());
 
     // Spawn the terminal poller ONCE — it lives for the entire session.

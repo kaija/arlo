@@ -27,6 +27,8 @@ struct CliArgs {
     model: Option<String>,
     prompt: Option<String>,
     dump_prompt: bool,
+    /// When true, skip all permission checks (bypass mode).
+    skip_permissions: bool,
 }
 
 /// Parse CLI arguments manually (no clap dependency needed).
@@ -40,6 +42,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut model: Option<String> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut dump_prompt = false;
+    let mut skip_permissions = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -53,6 +56,9 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--dump-prompt" => {
                 dump_prompt = true;
+            }
+            "--skip-permissions" | "--yolo" | "--no-permissions" => {
+                skip_permissions = true;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -78,6 +84,7 @@ fn parse_args() -> Result<CliArgs, String> {
         model,
         prompt,
         dump_prompt,
+        skip_permissions,
     })
 }
 
@@ -90,6 +97,9 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  --model <MODEL>   Model name (e.g., openai:gpt-4, anthropic:claude-sonnet-4-20250514)");
     eprintln!("  --dump-prompt     Print the full system prompt (instructions + tool definitions) and exit");
+    eprintln!("  --skip-permissions");
+    eprintln!("                    Skip all permission checks (auto-approve every tool call)");
+    eprintln!("  --yolo            Alias for --skip-permissions");
     eprintln!("  --help, -h        Show this help message");
     eprintln!();
     eprintln!("If PROMPT is provided, run in single-prompt mode (print response and exit).");
@@ -384,7 +394,12 @@ async fn main() {
         }
         None => {
             // Interactive TUI REPL mode
-            if let Err(e) = tui::run_tui_repl(provider, &model, tools, instructions).await {
+            let permission_mode = if cli.skip_permissions {
+                PermissionMode::Bypass
+            } else {
+                PermissionMode::Normal
+            };
+            if let Err(e) = tui::run_tui_repl(provider, &model, tools, instructions, permission_mode).await {
                 eprintln!("{}", e);
                 process::exit(1);
             }
