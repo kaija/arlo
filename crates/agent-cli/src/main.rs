@@ -22,16 +22,24 @@ use agent_core::{
 use agent_llm::UnifiedProvider;
 use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
 
+/// Parsed CLI options.
+struct CliArgs {
+    model: Option<String>,
+    prompt: Option<String>,
+    dump_prompt: bool,
+}
+
 /// Parse CLI arguments manually (no clap dependency needed).
 ///
-/// Usage: arlo [--model MODEL] [PROMPT...]
+/// Usage: arlo [--model MODEL] [--dump-prompt] [PROMPT...]
 ///
-/// Returns (model_override, prompt) where prompt is None for REPL mode.
-fn parse_args() -> Result<(Option<String>, Option<String>), String> {
+/// Returns parsed CLI arguments.
+fn parse_args() -> Result<CliArgs, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut model: Option<String> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
+    let mut dump_prompt = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -42,6 +50,9 @@ fn parse_args() -> Result<(Option<String>, Option<String>), String> {
                     return Err("--model requires a value".to_string());
                 }
                 model = Some(args[i].clone());
+            }
+            "--dump-prompt" => {
+                dump_prompt = true;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -63,7 +74,11 @@ fn parse_args() -> Result<(Option<String>, Option<String>), String> {
         Some(prompt_parts.join(" "))
     };
 
-    Ok((model, prompt))
+    Ok(CliArgs {
+        model,
+        prompt,
+        dump_prompt,
+    })
 }
 
 /// Print usage information.
@@ -74,6 +89,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <MODEL>   Model name (e.g., openai:gpt-4, anthropic:claude-sonnet-4-20250514)");
+    eprintln!("  --dump-prompt     Print the full system prompt (instructions + tool definitions) and exit");
     eprintln!("  --help, -h        Show this help message");
     eprintln!();
     eprintln!("If PROMPT is provided, run in single-prompt mode (print response and exit).");
@@ -180,6 +196,70 @@ fn resolve_model_name(model_override: Option<String>, provider: &UnifiedProvider
     }
 }
 
+/// Dump the full system prompt (instructions + tool definitions) for debugging.
+///
+/// This helps troubleshoot where tokens are being spent by showing exactly what
+/// gets sent to the model as the system message and tool schema.
+fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
+    let system_text = match instructions {
+        Instructions::Static(s) => s.clone(),
+        Instructions::Dynamic(_) => "(dynamic — cannot be rendered statically)".to_string(),
+    };
+
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║                     SYSTEM PROMPT DUMP                          ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // --- System Instructions ---
+    println!("┌─── System Instructions ───────────────────────────────────────────");
+    if system_text.is_empty() {
+        println!("│ (empty — no system prompt configured)");
+    } else {
+        for line in system_text.lines() {
+            println!("│ {}", line);
+        }
+    }
+    println!("└────────────────────────────────────────────────────────────────────");
+    println!();
+
+    // --- Tool Definitions ---
+    let enabled_tools: Vec<&Arc<dyn Tool>> = tools.iter().filter(|t| t.is_enabled()).collect();
+    println!("┌─── Tool Definitions ({} tools) ─────────────────────────────────", enabled_tools.len());
+
+    let mut total_schema_bytes: usize = 0;
+    for tool in &enabled_tools {
+        let schema = tool.parameters_schema();
+        let schema_str = serde_json::to_string_pretty(&schema).unwrap_or_default();
+        total_schema_bytes += schema_str.len();
+
+        println!("│");
+        println!("│ ▸ {} ", tool.name());
+        println!("│   description: {}", tool.description());
+        println!("│   schema:");
+        for line in schema_str.lines() {
+            println!("│     {}", line);
+        }
+    }
+    println!("│");
+    println!("└────────────────────────────────────────────────────────────────────");
+    println!();
+
+    // --- Token estimate ---
+    let instructions_chars = system_text.len();
+    // Rough estimate: ~4 chars per token for English text, ~3 for JSON
+    let est_instruction_tokens = instructions_chars / 4;
+    let est_schema_tokens = total_schema_bytes / 3;
+    let est_total = est_instruction_tokens + est_schema_tokens;
+
+    println!("┌─── Estimated Token Usage ─────────────────────────────────────────");
+    println!("│ Instructions:  ~{:>6} chars  (~{} tokens)", instructions_chars, est_instruction_tokens);
+    println!("│ Tool schemas:  ~{:>6} chars  (~{} tokens)", total_schema_bytes, est_schema_tokens);
+    println!("│ ─────────────────────────────────────");
+    println!("│ Total estimate: ~{} tokens (before model-specific tokenization)", est_total);
+    println!("└────────────────────────────────────────────────────────────────────");
+}
+
 /// Run a single prompt through the agent and return the output.
 ///
 /// In single-prompt (non-interactive) mode, a `DenyAllApprovalHandler` is wired
@@ -220,7 +300,7 @@ async fn run_single_prompt(
 #[tokio::main]
 async fn main() {
     // Parse arguments
-    let (model_override, prompt) = match parse_args() {
+    let cli = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -230,10 +310,31 @@ async fn main() {
         }
     };
 
-    // Initialize the unified provider from environment
+    // Initialize the unified provider from environment (not needed for --dump-prompt)
     let provider = match UnifiedProvider::from_env() {
         Ok(p) => Arc::new(p),
         Err(e) => {
+            if cli.dump_prompt {
+                // For dump-prompt, provider isn't strictly necessary but we
+                // still want to show the model resolution if possible.
+                eprintln!("warning: {}", e);
+                eprintln!();
+
+                // Load skills and tools anyway for the dump
+                let (skill_registry, skill_tools) = load_skills();
+                let mut tools = default_tools();
+                tools.extend(skill_tools);
+
+                let skill_prompt = skill_registry.system_prompt_section();
+                let instructions = if skill_prompt.is_empty() {
+                    Instructions::Static(String::new())
+                } else {
+                    Instructions::Static(skill_prompt)
+                };
+
+                dump_prompt(&instructions, &tools);
+                process::exit(0);
+            }
             eprintln!("error: {}", e);
             eprintln!();
             eprintln!("Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST");
@@ -242,7 +343,7 @@ async fn main() {
     };
 
     // Resolve the model name
-    let model = resolve_model_name(model_override, &provider);
+    let model = resolve_model_name(cli.model, &provider);
 
     // Load skills from .arlo/skills/ directories
     let (skill_registry, skill_tools) = load_skills();
@@ -259,8 +360,16 @@ async fn main() {
         Instructions::Static(skill_prompt)
     };
 
+    // Handle --dump-prompt: print everything and exit
+    if cli.dump_prompt {
+        println!("Model: {}", model);
+        println!();
+        dump_prompt(&instructions, &tools);
+        process::exit(0);
+    }
+
     // Dispatch to single-prompt or REPL mode
-    match prompt {
+    match cli.prompt {
         Some(prompt_text) => {
             // Single-prompt mode: run, print, exit
             match run_single_prompt(provider, &model, &prompt_text, tools, instructions).await {

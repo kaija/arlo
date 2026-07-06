@@ -169,12 +169,18 @@ fn arb_compaction_state() -> impl Strategy<Value = CompactionState> {
         any::<u32>(),                       // total_compactions
         0..1000usize,                       // messages_removed
         proptest::option::of(any::<u32>()), // last_compaction_turn
+        0..10u32,                           // consecutive_failures
+        any::<bool>(),                      // circuit_broken
+        proptest::option::of(0..500000usize), // last_token_count
     )
         .prop_map(
-            |(total_compactions, messages_removed, last_compaction_turn)| CompactionState {
+            |(total_compactions, messages_removed, last_compaction_turn, consecutive_failures, circuit_broken, last_token_count)| CompactionState {
                 total_compactions,
                 messages_removed,
                 last_compaction_turn,
+                consecutive_failures,
+                circuit_broken,
+                last_token_count,
             },
         )
 }

@@ -12,6 +12,9 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::agent::{Agent, Instructions, RunContext};
+use crate::compaction::config::CompactionLayerConfig;
+use crate::compaction::tokens::compute_token_count;
+use crate::compaction::CompactionPipeline;
 use crate::compactor::{CompactionConfig, CompactionStage, ContextCompactor};
 use crate::config::{ApprovalContext, ApprovalResponse, Input, RunConfig, RunResult};
 use crate::error::RunError;
@@ -64,7 +67,10 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
 
     // Optional compaction config — for now use a basic default if agent has one
     // Later tasks (8.5, 8.6) will wire guardrails and budget here
-    let compactor = ContextCompactor::new(CompactionConfig::default());
+    let _compactor = ContextCompactor::new(CompactionConfig::default());
+
+    // New 4-layer compaction pipeline (replaces single-step compactor)
+    let mut pipeline = CompactionPipeline::new(CompactionLayerConfig::default());
 
     // Recovery tracker for error-to-strategy mapping and attempt counting
     let mut recovery_tracker = RecoveryTracker::new();
@@ -81,8 +87,25 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
 
         tracing::info!(turn = state.current_turn, "turn_start");
 
-        // Phase 1: Context compaction
-        let _compaction_event = compactor.compact(&mut state.messages);
+        // Phase 1: Context compaction (4-layer pipeline)
+        let token_count = compute_token_count(
+            &state.messages,
+            state.messages.iter().rev().find_map(|m| match m {
+                Message::Assistant { usage, .. } => usage.as_ref(),
+                _ => None,
+            }),
+        );
+        let _compaction_event = pipeline
+            .compact(
+                &mut state.messages,
+                &mut state.compaction_state,
+                token_count,
+                model.context_window(),
+                model.max_output_tokens(),
+                state.current_turn,
+                Some(model.as_ref()),
+            )
+            .await;
 
         // Phase 1.5: Input guardrails (first turn only)
         if state.current_turn == 0 {
@@ -444,7 +467,10 @@ struct StreamState {
     config: RunConfig,
     state: RunState,
     max_turns: u32,
+    #[allow(dead_code)] // Deprecated: kept for transition to CompactionPipeline
     compactor: ContextCompactor,
+    /// New 4-layer compaction pipeline (replaces compactor).
+    pipeline: CompactionPipeline,
     phase: StreamPhase,
     finished: bool,
     recovery_tracker: RecoveryTracker,
@@ -463,6 +489,7 @@ impl StreamState {
         let state = initialize_state(&agent, &input);
         let max_turns = agent.max_turns.unwrap_or(config.max_turns);
         let compactor = ContextCompactor::new(CompactionConfig::default());
+        let pipeline = CompactionPipeline::new(CompactionLayerConfig::default());
         let effective_max_output_tokens = config.max_output_tokens;
         let run_span = tracing::info_span!(
             "agent.run",
@@ -475,6 +502,7 @@ impl StreamState {
             state,
             max_turns,
             compactor,
+            pipeline,
             phase: StreamPhase::TurnStart,
             finished: false,
             recovery_tracker: RecoveryTracker::new(),
@@ -539,8 +567,36 @@ impl StreamState {
             }
         }
 
-        // Phase 1: Compaction
-        let _compaction_event = self.compactor.compact(&mut self.state.messages);
+        // Resolve model early so it's available for compaction and request phases
+        let model = match self.config.provider.resolve(&self.config.model).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(error = %e, "model_resolution_error");
+                // Model resolution failure is unrecoverable — can't proceed without a model
+                return TurnOutcome::Error(RunError::Model(e));
+            }
+        };
+
+        // Phase 1: Compaction (4-layer pipeline)
+        let token_count = compute_token_count(
+            &self.state.messages,
+            self.state.messages.iter().rev().find_map(|m| match m {
+                Message::Assistant { usage, .. } => usage.as_ref(),
+                _ => None,
+            }),
+        );
+        let _compaction_event = self
+            .pipeline
+            .compact(
+                &mut self.state.messages,
+                &mut self.state.compaction_state,
+                token_count,
+                model.context_window(),
+                model.max_output_tokens(),
+                self.state.current_turn,
+                Some(model.as_ref()),
+            )
+            .await;
 
         // Phase 2: Prepare request
         let system = resolve_instructions(&self.agent, &self.state).await;
@@ -555,15 +611,6 @@ impl StreamState {
         };
 
         // Phase 3: Stream model
-        let model = match self.config.provider.resolve(&self.config.model).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = %e, "model_resolution_error");
-                // Model resolution failure is unrecoverable — can't proceed without a model
-                return TurnOutcome::Error(RunError::Model(e));
-            }
-        };
-
         let model_call_span = tracing::info_span!("model.call", model = %model.name());
         let model_stream = match model.stream(request).instrument(model_call_span).await {
             Ok(s) => s,

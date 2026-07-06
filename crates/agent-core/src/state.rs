@@ -24,6 +24,12 @@ pub struct CompactionState {
     pub messages_removed: usize,
     /// The turn number at which the last compaction occurred, if any.
     pub last_compaction_turn: Option<u32>,
+    /// Number of consecutive compaction failures (for circuit breaker logic).
+    pub consecutive_failures: u32,
+    /// Whether the circuit breaker has tripped, disabling further compaction attempts.
+    pub circuit_broken: bool,
+    /// The last observed token count before compaction was attempted.
+    pub last_token_count: Option<usize>,
 }
 
 /// The fully serializable snapshot of a run's state.
@@ -193,6 +199,9 @@ mod tests {
             total_compactions: 2,
             messages_removed: 15,
             last_compaction_turn: Some(2),
+            consecutive_failures: 0,
+            circuit_broken: false,
+            last_token_count: None,
         };
         state.trace_id = "trace-xyz-789".to_string();
 
@@ -257,6 +266,9 @@ mod tests {
         assert_eq!(cs.total_compactions, 0);
         assert_eq!(cs.messages_removed, 0);
         assert_eq!(cs.last_compaction_turn, None);
+        assert_eq!(cs.consecutive_failures, 0);
+        assert_eq!(cs.circuit_broken, false);
+        assert_eq!(cs.last_token_count, None);
     }
 
     #[test]
@@ -265,6 +277,9 @@ mod tests {
             total_compactions: 5,
             messages_removed: 42,
             last_compaction_turn: Some(10),
+            consecutive_failures: 1,
+            circuit_broken: false,
+            last_token_count: Some(150000),
         };
         let json = serde_json::to_string(&cs).unwrap();
         let restored: CompactionState = serde_json::from_str(&json).unwrap();

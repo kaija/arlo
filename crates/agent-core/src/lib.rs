@@ -1,6 +1,7 @@
 //! agent-core: Core traits, types, and loop logic for the arlo-rust agent framework.
 
 pub mod agent;
+pub mod compaction;
 pub mod compactor;
 pub mod config;
 pub mod error;
@@ -39,6 +40,13 @@ pub use tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 pub use compactor::{
     CompactionConfig, CompactionEvent, CompactionFn, CompactionStage, ContextCompactor,
+};
+
+pub use compaction::{
+    config::CompactionLayerConfig,
+    layer::{CompactionContext, CompactionLayer, LayerResult},
+    tokens::{compute_token_count, estimate_tokens},
+    CompactionPipeline,
 };
 
 pub use executor::{StreamingToolExecutor, ToolResult};
