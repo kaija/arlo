@@ -20,6 +20,7 @@ pub enum AppMode {
     /// Displaying a permission prompt (y/a/n).
     PermissionPrompt,
     /// The application is exiting.
+    #[allow(dead_code)]
     Exiting,
 }
 
@@ -118,7 +119,7 @@ pub enum AppEvent {
     /// An event from the agent RunStream.
     AgentEvent(RunEvent),
     /// The terminal was resized to (cols, rows).
-    Resize(u16, u16),
+    Resize(#[allow(dead_code)] u16, #[allow(dead_code)] u16),
     /// A periodic tick for animations/heartbeat.
     Tick,
     /// An approval request from the InteractiveApprovalHandler channel.
@@ -144,6 +145,7 @@ pub enum SpanStyle {
     /// Tool name display.
     ToolName,
     /// Tool output content.
+    #[allow(dead_code)]
     ToolOutput,
     /// Error messages.
     Error,
@@ -161,6 +163,7 @@ pub struct ToolEntry {
     /// Unique identifier for this tool invocation.
     pub id: String,
     /// The name of the tool.
+    #[allow(dead_code)]
     pub name: String,
     /// Current execution status.
     pub status: ToolStatus,

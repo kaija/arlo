@@ -19,6 +19,7 @@ use super::app::AppEvent;
 /// that arrive during the transition window.
 pub struct TerminalPoller {
     /// Handle to the blocking poll task (aborted only on app exit).
+    #[allow(dead_code)]
     pub handle: JoinHandle<()>,
 }
 
