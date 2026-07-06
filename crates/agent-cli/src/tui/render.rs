@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{AppMode, AppState, PermissionPromptState, SpanStyle};
+use super::app::{AgentActivity, AppMode, AppState, PermissionPromptState, SpanStyle};
 
 /// Draw the entire TUI frame.
 ///
@@ -294,7 +294,7 @@ fn render_permission_editing_pattern(
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
-/// Render the status bar showing mode indicator, model name, and token usage.
+/// Render the status bar showing mode indicator, activity status, and token usage.
 fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let mode_span = match state.mode {
         AppMode::Idle => Span::styled(
@@ -327,17 +327,72 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
         ),
     };
 
-    let usage_text = if let Some(usage) = &state.last_usage {
-        format!(" tokens: {}in / {}out ", usage.input_tokens, usage.output_tokens)
-    } else {
-        String::new()
-    };
+    // Build activity indicator spans (only shown when running)
+    let mut spans = vec![mode_span, Span::raw("  ")];
 
-    let status_line = Line::from(vec![
-        mode_span,
-        Span::raw("  "),
-        Span::styled(usage_text, Style::default().fg(Color::DarkGray)),
-    ]);
+    if state.mode == AppMode::Running {
+        let spinner = state.spinner_frame();
+        let (activity_text, activity_color) = match &state.activity {
+            AgentActivity::Idle => ("waiting", Color::DarkGray),
+            AgentActivity::Responding => ("responding", Color::Cyan),
+            AgentActivity::Thinking => ("thinking", Color::Magenta),
+            AgentActivity::ToolExecuting { tool_name } => {
+                // We'll handle tool_name separately below
+                let _ = tool_name;
+                ("tool", Color::Yellow)
+            }
+        };
+
+        // Spinner
+        spans.push(Span::styled(
+            spinner,
+            Style::default().fg(activity_color),
+        ));
+        spans.push(Span::raw(" "));
+
+        // Activity label (with tool name if executing)
+        match &state.activity {
+            AgentActivity::ToolExecuting { tool_name } => {
+                spans.push(Span::styled(
+                    format!("executing: {}", tool_name),
+                    Style::default().fg(activity_color),
+                ));
+            }
+            _ => {
+                spans.push(Span::styled(
+                    activity_text,
+                    Style::default().fg(activity_color),
+                ));
+            }
+        }
+
+        // Turn counter
+        if state.current_turn > 0 {
+            spans.push(Span::styled(
+                format!("  turn {}", state.current_turn),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        // Elapsed time
+        let elapsed = state.elapsed_display();
+        if !elapsed.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", elapsed),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    // Token usage (always shown if available)
+    if let Some(usage) = &state.last_usage {
+        spans.push(Span::styled(
+            format!("  tokens: {}in / {}out", usage.input_tokens, usage.output_tokens),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let status_line = Line::from(spans);
 
     let paragraph = Paragraph::new(status_line)
         .style(Style::default().bg(Color::Black));

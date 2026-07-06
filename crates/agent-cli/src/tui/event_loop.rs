@@ -45,6 +45,11 @@ pub fn spawn_terminal_poller() -> (mpsc::UnboundedSender<AppEvent>, mpsc::Unboun
                         }
                     }
                 }
+            } else {
+                // No terminal event within the poll window — emit a Tick for animations
+                if term_tx.send(AppEvent::Tick).is_err() {
+                    break;
+                }
             }
         }
     });

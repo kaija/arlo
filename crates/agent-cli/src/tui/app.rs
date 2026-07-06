@@ -188,6 +188,25 @@ pub struct UsageSummary {
     pub output_tokens: u64,
 }
 
+/// What the agent is currently doing — drives the status bar activity indicator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentActivity {
+    /// No activity (idle or between events).
+    Idle,
+    /// Model is generating a response (streaming text).
+    Responding,
+    /// Model is in extended thinking mode.
+    Thinking,
+    /// A tool is executing.
+    ToolExecuting {
+        /// The name of the tool currently running.
+        tool_name: String,
+    },
+}
+
+/// Spinner frames for the activity indicator (Braille pattern animation).
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// The result of processing an AppEvent through the state machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateResult {
@@ -237,6 +256,14 @@ pub struct AppState {
     pub ctrl_c_abort_pending: bool,
     /// Token usage from the last completed run.
     pub last_usage: Option<UsageSummary>,
+    /// Current agent activity for the status bar indicator.
+    pub activity: AgentActivity,
+    /// Spinner animation frame counter (incremented on each Tick while running).
+    pub spinner_tick: usize,
+    /// Current turn number in the agent loop.
+    pub current_turn: u32,
+    /// When the current run started (for elapsed time display).
+    pub run_started_at: Option<Instant>,
 }
 
 impl AppState {
@@ -256,6 +283,31 @@ impl AppState {
             last_ctrl_c: None,
             ctrl_c_abort_pending: false,
             last_usage: None,
+            activity: AgentActivity::Idle,
+            spinner_tick: 0,
+            current_turn: 0,
+            run_started_at: None,
+        }
+    }
+
+    /// Get the current spinner frame character for the activity indicator.
+    pub fn spinner_frame(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_tick % SPINNER_FRAMES.len()]
+    }
+
+    /// Get the elapsed time since the current run started, formatted as a string.
+    pub fn elapsed_display(&self) -> String {
+        match self.run_started_at {
+            Some(started) => {
+                let elapsed = started.elapsed();
+                let secs = elapsed.as_secs();
+                if secs < 60 {
+                    format!("{}s", secs)
+                } else {
+                    format!("{}m{}s", secs / 60, secs % 60)
+                }
+            }
+            None => String::new(),
         }
     }
 
@@ -286,7 +338,12 @@ impl AppState {
                 // ratatui handles terminal resize automatically during render
                 UpdateResult::Continue
             }
-            AppEvent::Tick => UpdateResult::Continue,
+            AppEvent::Tick => {
+                if self.mode == AppMode::Running {
+                    self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                }
+                UpdateResult::Continue
+            }
         }
     }
 
@@ -623,12 +680,14 @@ impl AppState {
         match event {
             RunEvent::StreamChunk(chunk) => match chunk {
                 StreamChunk::TextDelta { text } => {
+                    self.activity = AgentActivity::Responding;
                     self.output_buffer.push(OutputSpan {
                         text,
                         style: SpanStyle::Normal,
                     });
                 }
                 StreamChunk::ThinkingDelta { text } => {
+                    self.activity = AgentActivity::Thinking;
                     self.output_buffer.push(OutputSpan {
                         text,
                         style: SpanStyle::Thinking,
@@ -648,7 +707,15 @@ impl AppState {
                 _ => {}
             },
 
+            RunEvent::TurnStart { turn, .. } => {
+                self.current_turn = turn;
+                self.activity = AgentActivity::Responding;
+            }
+
             RunEvent::ToolStart { id, name } => {
+                self.activity = AgentActivity::ToolExecuting {
+                    tool_name: name.clone(),
+                };
                 self.active_tools.push(ToolEntry {
                     id,
                     name,
@@ -669,9 +736,12 @@ impl AppState {
                     entry.output = Some(output);
                     entry.is_error = is_error;
                 }
+                // Revert to Responding after tool completes (model will continue)
+                self.activity = AgentActivity::Responding;
             }
 
             RunEvent::Interruption { pending } => {
+                self.activity = AgentActivity::Idle;
                 self.mode = AppMode::PermissionPrompt;
                 self.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
                 self.pending_approvals = pending;
@@ -706,6 +776,9 @@ impl AppState {
                     output_tokens: usage.output_tokens,
                 });
                 self.mode = AppMode::Idle;
+                self.activity = AgentActivity::Idle;
+                self.current_turn = 0;
+                self.run_started_at = None;
                 self.active_tools.clear();
             }
 
@@ -715,6 +788,8 @@ impl AppState {
                     style: SpanStyle::Error,
                 });
                 self.mode = AppMode::Idle;
+                self.activity = AgentActivity::Idle;
+                self.run_started_at = None;
             }
 
             RunEvent::Aborted { reason } => {
@@ -723,6 +798,8 @@ impl AppState {
                     style: SpanStyle::Warning,
                 });
                 self.mode = AppMode::Idle;
+                self.activity = AgentActivity::Idle;
+                self.run_started_at = None;
             }
 
             RunEvent::MaxTurns { count } => {
@@ -731,6 +808,8 @@ impl AppState {
                     style: SpanStyle::Warning,
                 });
                 self.mode = AppMode::Idle;
+                self.activity = AgentActivity::Idle;
+                self.run_started_at = None;
             }
 
             RunEvent::GuardrailTripped { name, reason } => {
@@ -739,11 +818,12 @@ impl AppState {
                     style: SpanStyle::Warning,
                 });
                 self.mode = AppMode::Idle;
+                self.activity = AgentActivity::Idle;
+                self.run_started_at = None;
             }
 
             // Non-terminal events we don't surface in the TUI
-            RunEvent::TurnStart { .. }
-            | RunEvent::SubAgentStart { .. }
+            RunEvent::SubAgentStart { .. }
             | RunEvent::SubAgentEnd { .. }
             | RunEvent::Compaction { .. }
             | RunEvent::StepResolved(_) => {}

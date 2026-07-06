@@ -103,6 +103,10 @@ pub async fn run_tui_repl(
                     content: vec![ContentBlock::Text { text: prompt }],
                 });
                 state.mode = AppMode::Running;
+                state.activity = app::AgentActivity::Responding;
+                state.run_started_at = Some(std::time::Instant::now());
+                state.current_turn = 0;
+                state.spinner_tick = 0;
 
                 // Build agent
                 let mut builder = Agent::builder("arlo")
