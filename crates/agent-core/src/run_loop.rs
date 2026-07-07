@@ -1005,7 +1005,7 @@ fn initialize_state(agent: &Agent, input: &Input) -> RunState {
 
 /// Resolve the agent's instructions to a string.
 async fn resolve_instructions(agent: &Agent, state: &RunState) -> String {
-    match &agent.instructions {
+    let mut instructions = match &agent.instructions {
         Instructions::Static(s) => s.clone(),
         Instructions::Dynamic(f) => {
             let ctx = RunContext {
@@ -1013,7 +1013,16 @@ async fn resolve_instructions(agent: &Agent, state: &RunState) -> String {
             };
             f(&ctx).await
         }
+    };
+
+    // Append the current date and time
+    let now = chrono::Local::now().to_rfc3339();
+    if !instructions.is_empty() {
+        instructions.push_str("\n\n");
     }
+    instructions.push_str(&format!("Current date and time: {}", now));
+
+    instructions
 }
 
 /// Build tool definitions from the agent's registered tools.

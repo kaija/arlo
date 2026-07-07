@@ -211,10 +211,17 @@ fn resolve_model_name(model_override: Option<String>, provider: &UnifiedProvider
 /// This helps troubleshoot where tokens are being spent by showing exactly what
 /// gets sent to the model as the system message and tool schema.
 fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
-    let system_text = match instructions {
+    let mut system_text = match instructions {
         Instructions::Static(s) => s.clone(),
         Instructions::Dynamic(_) => "(dynamic — cannot be rendered statically)".to_string(),
     };
+
+    // Append the current date and time to match runtime resolution
+    let now = chrono::Local::now().to_rfc3339();
+    if !system_text.is_empty() {
+        system_text.push_str("\n\n");
+    }
+    system_text.push_str(&format!("Current date and time: {}", now));
 
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║                     SYSTEM PROMPT DUMP                          ║");

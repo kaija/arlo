@@ -17,6 +17,7 @@ use crate::agent::SubAgentDef;
 use crate::config::{Input, RunConfig, RunResult};
 use crate::error::ToolError;
 use crate::run_loop::run;
+use crate::task_store::{CreateTaskParams, TaskStatus, TaskStore, TaskType, TaskUsage};
 use crate::tool::{Concurrency, Tool, ToolContext, ToolOutput};
 
 /// Global counter for generating unique background task identifiers.
@@ -41,12 +42,20 @@ pub struct SubAgentTool {
     /// The parent's RunConfig, used as the basis for spawning sub-agent runs.
     /// The sub-agent's max_turns may override the parent's.
     pub config: RunConfig,
+    /// Optional task store for tracking background tasks.
+    /// When None, falls back to fire-and-forget behavior.
+    pub task_store: Option<Arc<dyn TaskStore>>,
 }
 
 impl SubAgentTool {
     /// Create a new SubAgentTool from a definition and parent config.
     pub fn new(def: SubAgentDef, config: RunConfig) -> Self {
-        Self { def, config }
+        Self { def, config, task_store: None }
+    }
+
+    /// Create a SubAgentTool with task tracking enabled.
+    pub fn with_task_store(def: SubAgentDef, config: RunConfig, task_store: Arc<dyn TaskStore>) -> Self {
+        Self { def, config, task_store: Some(task_store) }
     }
 
     /// Build a RunConfig for the sub-agent, overriding max_turns if specified.
@@ -149,7 +158,6 @@ impl SubAgentTool {
         let sub_config = self.sub_agent_config();
         let sub_input = Input::Fresh { prompt };
         let agent = Arc::clone(&self.def.agent);
-        let task_id = BACKGROUND_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
         let agent_name = self.def.agent.name.clone();
 
         let sub_agent_span = tracing::info_span!(
@@ -157,20 +165,104 @@ impl SubAgentTool {
             agent_name = %agent_name,
         );
 
-        // Spawn as a detached tokio task
-        tokio::spawn(
-            async move {
-                let _result = run(&agent, sub_input, &sub_config).await;
-                // Background task result is fire-and-forget.
-                // In a full implementation, results could be stored in a task registry.
-            }
-            .instrument(sub_agent_span),
-        );
+        if let Some(store) = &self.task_store {
+            // Task-tracked background mode: register, transition, and track via the store.
+            let store = Arc::clone(store);
+            let desc = format!("Sub-agent '{}' background task", agent_name);
 
-        Ok(ToolOutput::Text(format!(
-            "Background task started: task_id={}, agent='{}'",
-            task_id, self.def.agent.name
-        )))
+            tokio::spawn(
+                async move {
+                    let params = CreateTaskParams {
+                        description: desc,
+                        task_type: TaskType::SubAgent,
+                        dependencies: vec![],
+                        max_retries: 0,
+                    };
+
+                    // Best-effort registration: if store operations fail, log and continue.
+                    let task_id = match store.create_task(params).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to register background task in store");
+                            // Fall back to just running without tracking
+                            let _result = run(&agent, sub_input, &sub_config).await;
+                            return;
+                        }
+                    };
+
+                    // Transition to Running
+                    if let Err(e) = store
+                        .transition_task(&task_id, TaskStatus::Running, None)
+                        .await
+                    {
+                        tracing::warn!(error = %e, task_id = %task_id, "Failed to transition task to Running");
+                    }
+
+                    // Execute sub-agent
+                    match run(&agent, sub_input, &sub_config).await {
+                        Ok(result) => {
+                            // Transition to Completed with output
+                            if let Err(e) = store
+                                .transition_task(
+                                    &task_id,
+                                    TaskStatus::Completed,
+                                    Some(result.output),
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, task_id = %task_id, "Failed to transition task to Completed");
+                            }
+
+                            // Store usage metadata
+                            let usage = TaskUsage {
+                                input_tokens: result.usage.input_tokens,
+                                output_tokens: result.usage.output_tokens,
+                                cost_usd: result.cost_usd,
+                            };
+                            if let Err(e) = store.update_task_usage(&task_id, usage).await {
+                                tracing::warn!(error = %e, task_id = %task_id, "Failed to update task usage");
+                            }
+                        }
+                        Err(e) => {
+                            // Transition to Failed with error message
+                            if let Err(store_err) = store
+                                .transition_task(
+                                    &task_id,
+                                    TaskStatus::Failed,
+                                    Some(e.to_string()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %store_err, task_id = %task_id, "Failed to transition task to Failed");
+                            }
+                        }
+                    }
+                }
+                .instrument(sub_agent_span),
+            );
+
+            Ok(ToolOutput::Text(format!(
+                "Background task registered and started: agent='{}'",
+                self.def.agent.name
+            )))
+        } else {
+            // Existing fire-and-forget behavior when no task store is present.
+            let task_id = BACKGROUND_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            tokio::spawn(
+                async move {
+                    let _result = run(&agent, sub_input, &sub_config).await;
+                    // Background task result is fire-and-forget.
+                    // In a full implementation, results could be stored in a task registry.
+                }
+                .instrument(sub_agent_span),
+            );
+
+            Ok(ToolOutput::Text(format!(
+                "Background task started: task_id={}, agent='{}'",
+                task_id, self.def.agent.name
+            )))
+        }
     }
 }
 

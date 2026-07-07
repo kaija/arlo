@@ -20,6 +20,8 @@ pub mod skill;
 pub mod sub_agent;
 pub mod pattern;
 pub mod settings;
+pub mod task_store;
+pub mod in_memory_task_store;
 pub mod tool;
 
 pub use agent::{
@@ -60,3 +62,10 @@ pub use sub_agent::{SubAgentTool, SubAgentUsage};
 pub use skill::{
     render_skill_body, Skill, SkillArgument, SkillContext, SkillRegistry, SkillSource, SkillTool,
 };
+
+pub use task_store::{
+    CreateTaskParams, TaskEntry, TaskId, TaskStatus, TaskStatusCounts, TaskStore, TaskStoreError,
+    TaskType, TaskUsage, TodoItem, TodoStatus,
+};
+
+pub use in_memory_task_store::InMemoryTaskStore;
