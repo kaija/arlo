@@ -1,10 +1,11 @@
 // TUI application state and state machine.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use agent_core::{ApprovalResponse, ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent, StreamChunk};
+use agent_core::{ApprovalResponse, ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent, StreamChunk, TaskStore};
 use agent_core::pattern::extract_primary_arg;
 
 use super::approval::ApprovalRequest;
@@ -267,11 +268,13 @@ pub struct AppState {
     pub current_turn: u32,
     /// When the current run started (for elapsed time display).
     pub run_started_at: Option<Instant>,
+    /// Shared task store for polling and slash commands.
+    pub task_store: Option<Arc<dyn TaskStore>>,
 }
 
 impl AppState {
     /// Create a new `AppState` with the given permission engine.
-    pub fn new(permissions: PermissionEngine) -> Self {
+    pub fn new(permissions: PermissionEngine, task_store: Option<Arc<dyn TaskStore>>) -> Self {
         Self {
             mode: AppMode::Idle,
             prompt_state: PermissionPromptState::AwaitingKey { selected: 0 },
@@ -290,6 +293,7 @@ impl AppState {
             spinner_tick: 0,
             current_turn: 0,
             run_started_at: None,
+            task_store,
         }
     }
 
@@ -386,6 +390,23 @@ impl AppState {
                 let text = self.input.take();
                 if text == "exit" || text == "quit" {
                     return UpdateResult::Exit;
+                }
+                // Intercept slash commands — never send /‑prefixed input to the LLM.
+                if text.starts_with('/') {
+                    // Display the user's command in the output buffer
+                    self.output_buffer.push(OutputSpan {
+                        text: format!("\n> {}\n", text),
+                        style: SpanStyle::User,
+                    });
+                    // Try to dispatch as a known slash command
+                    if let Some(result) = super::commands::try_handle_slash_command(&text, self) {
+                        return result;
+                    }
+                    // If try_handle_slash_command returns None, it means the input
+                    // started with '/' but wasn't recognized — this shouldn't happen
+                    // since the command handler itself handles unknown commands, but
+                    // guard against it by just continuing.
+                    return UpdateResult::Continue;
                 }
                 UpdateResult::StartRun(text)
             }
@@ -843,7 +864,7 @@ mod tests {
 
     fn make_state() -> AppState {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Running;
         state
     }
@@ -1102,7 +1123,7 @@ mod tests {
 
     fn make_idle_state() -> AppState {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        AppState::new(perms) // starts in Idle mode by default
+        AppState::new(perms, None) // starts in Idle mode by default
     }
 
     #[test]
@@ -1243,7 +1264,7 @@ mod tests {
 
     fn make_prompt_state() -> AppState {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.pending_approvals = vec![PendingApproval {
             tool_name: "shell".to_string(),
@@ -1297,7 +1318,7 @@ mod tests {
     #[test]
     fn exiting_mode_returns_exit_for_any_key() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Exiting;
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::Exit);
@@ -1315,7 +1336,7 @@ mod property_tests {
 
     fn make_state() -> AppState {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Running;
         state
     }
@@ -1494,7 +1515,7 @@ mod property_tests {
             })
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
             state.mode = AppMode::PermissionPrompt;
             state.pending_approvals = vec![PendingApproval {
                 tool_name: "test_tool".to_string(),
@@ -1516,7 +1537,7 @@ mod property_tests {
     #[test]
     fn double_ctrl_c_within_2s_exits() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Running;
 
         // Simulate first press just happened (within 2s window)
@@ -1530,7 +1551,7 @@ mod property_tests {
     #[test]
     fn double_ctrl_c_after_2s_resets() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Running;
 
         // Simulate first press happened 3 seconds ago (outside 2s window)
@@ -1548,7 +1569,7 @@ mod property_tests {
     #[test]
     fn double_ctrl_c_idle_within_2s_exits() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         // Idle mode, empty input
         state.mode = AppMode::Idle;
 
@@ -1563,7 +1584,7 @@ mod property_tests {
     #[test]
     fn double_ctrl_c_idle_after_2s_resets() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Idle;
 
         // Simulate first press happened 3 seconds ago
@@ -1588,7 +1609,7 @@ mod property_tests {
             _dummy in 0u8..50
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
             state.mode = AppMode::Running;
             // No prior Ctrl-C
             state.last_ctrl_c = None;
@@ -1612,7 +1633,7 @@ mod property_tests {
             input_text in "[a-z]{1,30}"
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
             state.mode = AppMode::Idle;
 
             // Insert text into the input buffer
@@ -1658,7 +1679,7 @@ mod property_tests {
             key in arbitrary_key_event_strategy()
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
             state.mode = AppMode::Running;
 
             let result = state.update(AppEvent::Key(key));
@@ -1689,7 +1710,7 @@ mod property_tests {
             let responses = &responses[..n];
 
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
 
             for i in 0..n {
                 // Simulate what mod.rs does on StartRun: push user message
@@ -1750,7 +1771,7 @@ mod property_tests {
             tool_name in "[a-z_]{1,15}",
         ) {
             let perms = PermissionEngine::new(PermissionMode::Normal);
-            let mut state = AppState::new(perms);
+            let mut state = AppState::new(perms, None);
             state.mode = AppMode::PermissionPrompt;
             state.pending_approvals = vec![PendingApproval {
                 tool_name: tool_name.clone(),
@@ -1960,14 +1981,14 @@ mod suggest_pattern_tests {
     #[test]
     fn prompt_state_defaults_to_awaiting_key() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
-        let state = AppState::new(perms);
+        let state = AppState::new(perms, None);
         assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
     }
 
     #[test]
     fn prompt_state_reset_on_interruption() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Running;
         // Simulate being in EditingPattern state from a previous prompt
         state.prompt_state = PermissionPromptState::EditingPattern {
@@ -1989,7 +2010,7 @@ mod suggest_pattern_tests {
     #[test]
     fn prompt_state_reset_on_approval_event() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::Idle;
         // Simulate leftover editing state
         state.prompt_state = PermissionPromptState::EditingPattern {
@@ -2014,7 +2035,7 @@ mod suggest_pattern_tests {
     #[test]
     fn prompt_state_reset_on_clear_approval() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.approval_via_handler = true;
         state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
@@ -2119,7 +2140,7 @@ mod p_key_handler_tests {
 
     fn make_prompt_state_with_tool(tool_name: &str, tool_input: serde_json::Value) -> AppState {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         state.pending_approvals = vec![PendingApproval {
@@ -2151,7 +2172,7 @@ mod p_key_handler_tests {
     #[test]
     fn p_key_with_no_approvals_stays_awaiting() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::AwaitingKey { selected: 0 };
         state.pending_approvals = vec![]; // no pending approvals
@@ -2279,7 +2300,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_backspace_at_start_does_nothing() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "hello".to_string(),
@@ -2308,7 +2329,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_delete_removes_char_at_cursor() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "hello".to_string(),
@@ -2337,7 +2358,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_left_arrow_moves_cursor() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "abc".to_string(),
@@ -2363,7 +2384,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_right_arrow_moves_cursor() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "abc".to_string(),
@@ -2389,7 +2410,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_left_at_start_does_nothing() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "abc".to_string(),
@@ -2415,7 +2436,7 @@ mod p_key_handler_tests {
     #[test]
     fn editing_pattern_right_at_end_does_nothing() {
         let perms = PermissionEngine::new(PermissionMode::Normal);
-        let mut state = AppState::new(perms);
+        let mut state = AppState::new(perms, None);
         state.mode = AppMode::PermissionPrompt;
         state.prompt_state = PermissionPromptState::EditingPattern {
             edit_buffer: "abc".to_string(),

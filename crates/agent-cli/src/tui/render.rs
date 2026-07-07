@@ -294,6 +294,16 @@ fn render_permission_editing_pattern(
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
+/// Helper to call an async function from synchronous render context.
+///
+/// Uses `tokio::task::block_in_place` with the current runtime handle to avoid
+/// blocking the async executor.
+fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(f)
+    })
+}
+
 /// Render the status bar showing mode indicator, activity status, and token usage.
 fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let mode_span = match state.mode {
@@ -390,6 +400,55 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
             format!("  tokens: {}in / {}out", usage.input_tokens, usage.output_tokens),
             Style::default().fg(Color::DarkGray),
         ));
+    }
+
+    // Task/todo status from the TaskStore (only when store is available)
+    if let Some(ref store) = state.task_store {
+        // Task counts by status
+        if let Ok(counts) = block_on_async(store.count_by_status()) {
+            let mut parts: Vec<String> = Vec::new();
+            if counts.running > 0 {
+                parts.push(format!("{}R", counts.running));
+            }
+            if counts.pending > 0 {
+                parts.push(format!("{}P", counts.pending));
+            }
+            if counts.completed > 0 {
+                parts.push(format!("{}C", counts.completed));
+            }
+            if counts.failed > 0 {
+                parts.push(format!("{}F", counts.failed));
+            }
+            if !parts.is_empty() {
+                spans.push(Span::styled(
+                    format!("  Tasks: {}", parts.join(" ")),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+
+        // InProgress todo items
+        if let Ok(todos) = block_on_async(store.list_todos()) {
+            let in_progress: Vec<_> = todos
+                .iter()
+                .filter(|t| t.status == agent_core::TodoStatus::InProgress)
+                .collect();
+
+            if !in_progress.is_empty() {
+                // Show the first InProgress item's active_form or content, truncated to 80 chars
+                if let Some(item) = in_progress.first() {
+                    let display_text = match &item.active_form {
+                        Some(af) if !af.is_empty() => af.as_str(),
+                        _ => item.content.as_str(),
+                    };
+                    let truncated: String = display_text.chars().take(80).collect();
+                    spans.push(Span::styled(
+                        format!("  ▸ {}", truncated),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+        }
     }
 
     let status_line = Line::from(spans);
@@ -567,6 +626,56 @@ mod property_tests {
                     "Chunk extends beyond terminal: x={} + w={} > {}", chunk.x, chunk.width, width);
                 prop_assert!(chunk.y + chunk.height <= height,
                     "Chunk extends below terminal: y={} + h={} > {}", chunk.y, chunk.height, height);
+            }
+        }
+
+        /// Feature: task-manager-tui-integration, Property 16: Status bar todo display
+        ///
+        /// **Validates: Requirements 3.6**
+        ///
+        /// For any InProgress TodoItem, the status bar display text SHALL use
+        /// active_form when it is Some and non-empty, otherwise SHALL use content,
+        /// and in either case SHALL truncate to a maximum of 80 characters.
+        #[test]
+        fn status_bar_todo_display(
+            content in ".{1,200}",
+            active_form in prop::option::of(".{0,200}"),
+        ) {
+            // Replicate the display text selection logic from render_status_bar
+            fn todo_display_text(content: &str, active_form: &Option<String>) -> String {
+                let display = match active_form {
+                    Some(af) if !af.is_empty() => af.as_str(),
+                    _ => content,
+                };
+                display.chars().take(80).collect()
+            }
+
+            let result = todo_display_text(&content, &active_form);
+
+            // Property: result is always at most 80 characters
+            prop_assert!(
+                result.chars().count() <= 80,
+                "Display text exceeds 80 chars: got {} chars",
+                result.chars().count()
+            );
+
+            // Property: when active_form is Some and non-empty, display uses active_form
+            match &active_form {
+                Some(af) if !af.is_empty() => {
+                    let expected: String = af.chars().take(80).collect();
+                    prop_assert_eq!(
+                        &result, &expected,
+                        "Expected active_form truncated to 80, got different text"
+                    );
+                }
+                // Property: when active_form is None or empty, display uses content
+                _ => {
+                    let expected: String = content.chars().take(80).collect();
+                    prop_assert_eq!(
+                        &result, &expected,
+                        "Expected content truncated to 80, got different text"
+                    );
+                }
             }
         }
     }

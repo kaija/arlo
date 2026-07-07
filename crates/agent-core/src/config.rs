@@ -15,6 +15,7 @@ use crate::next_step::PendingApproval;
 use crate::permission::{PermissionEngine, PermissionMode};
 use crate::settings::{PolicyMerger, SettingsLoader};
 use crate::state::RunState;
+use crate::task_store::TaskStore;
 
 /// The user's decision for a single pending approval request.
 ///
@@ -107,6 +108,10 @@ pub struct RunConfig {
     /// Optional name identifying this agent (used in `ApprovalContext` for sub-agent identification).
     /// `None` for the top-level agent; `Some(name)` for sub-agents.
     pub agent_name: Option<String>,
+    /// Optional shared TaskStore for todo-aware continuation.
+    /// When present and the model attempts to end its turn with incomplete todos,
+    /// the run loop injects a continuation prompt instead of terminating.
+    pub task_store: Option<Arc<dyn TaskStore>>,
 }
 
 impl std::fmt::Debug for RunConfig {
@@ -121,6 +126,7 @@ impl std::fmt::Debug for RunConfig {
             .field("approval_handler", &self.approval_handler.is_some())
             .field("permissions", &self.permissions)
             .field("agent_name", &self.agent_name)
+            .field("task_store", &self.task_store.is_some())
             .finish()
     }
 }
@@ -143,6 +149,7 @@ impl RunConfig {
             approval_handler: None,
             permissions: PermissionEngine::new(PermissionMode::Bypass),
             agent_name: None,
+            task_store: None,
         }
     }
 }
@@ -159,6 +166,7 @@ pub struct RunConfigBuilder {
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
     permissions: PermissionEngine,
     agent_name: Option<String>,
+    task_store: Option<Arc<dyn TaskStore>>,
 }
 
 impl RunConfigBuilder {
@@ -221,6 +229,15 @@ impl RunConfigBuilder {
         self
     }
 
+    /// Set the shared TaskStore for todo-aware continuation.
+    ///
+    /// When configured, the run loop checks for incomplete todos before terminating.
+    /// If incomplete todos exist, a continuation prompt is injected and the loop continues.
+    pub fn task_store(mut self, store: Arc<dyn TaskStore>) -> Self {
+        self.task_store = Some(store);
+        self
+    }
+
     /// Load user-level and project-level settings files and merge them into the permission engine.
     ///
     /// This method is opt-in: if not called, no settings files are loaded and
@@ -265,6 +282,7 @@ impl RunConfigBuilder {
             approval_handler: self.approval_handler,
             permissions: self.permissions,
             agent_name: self.agent_name,
+            task_store: self.task_store,
         }
     }
 }

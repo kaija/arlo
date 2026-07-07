@@ -22,6 +22,7 @@ pub mod pattern;
 pub mod settings;
 pub mod task_store;
 pub mod in_memory_task_store;
+pub mod todolist_tool;
 pub mod tool;
 
 pub use agent::{
@@ -69,3 +70,5 @@ pub use task_store::{
 };
 
 pub use in_memory_task_store::InMemoryTaskStore;
+
+pub use todolist_tool::TodoListTool;

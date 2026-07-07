@@ -78,6 +78,9 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
     // Effective max_output_tokens that can be escalated during recovery
     let mut effective_max_output_tokens = config.max_output_tokens;
 
+    // Counter for consecutive todo-aware continuations (prevents infinite loops)
+    let mut todo_continuation_count: u32 = 0;
+
     // Main loop
     loop {
         // Phase 0: Check turn limit
@@ -215,6 +218,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             NextStep::Continue { .. } => {
                 // Reset recovery tracker on successful continuation
                 recovery_tracker.reset();
+                todo_continuation_count = 0;
                 // Append assistant message
                 state.messages.push(Message::Assistant {
                     content: assistant_content.clone(),
@@ -250,6 +254,52 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                         "{}: {}",
                         guardrail_name, reason
                     )));
+                }
+
+                // Todo-aware continuation: if there are incomplete todos, inject a
+                // continuation prompt instead of terminating (max 3 consecutive continuations).
+                if todo_continuation_count < 3 {
+                    if let Some(ref store) = config.task_store {
+                        if let Ok(todos) = store.list_todos().await {
+                            let incomplete: Vec<_> = todos
+                                .iter()
+                                .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
+                                .collect();
+                            if !incomplete.is_empty() {
+                                // Append the assistant's message first
+                                state.messages.push(Message::Assistant {
+                                    content: assistant_content.clone(),
+                                    usage: Some(usage.clone()),
+                                });
+                                // Inject a user continuation prompt
+                                let todo_summary: Vec<String> = incomplete
+                                    .iter()
+                                    .map(|t| {
+                                        format!(
+                                            "- [{}] {}",
+                                            match t.status {
+                                                crate::task_store::TodoStatus::Pending => " ",
+                                                crate::task_store::TodoStatus::InProgress => "~",
+                                                crate::task_store::TodoStatus::Completed => "x",
+                                            },
+                                            t.content
+                                        )
+                                    })
+                                    .collect();
+                                let continuation = format!(
+                                    "You have {} incomplete todo item(s). Continue working through them:\n{}",
+                                    incomplete.len(),
+                                    todo_summary.join("\n")
+                                );
+                                state.messages.push(Message::User {
+                                    content: vec![ContentBlock::Text { text: continuation }],
+                                });
+                                state.current_turn += 1;
+                                todo_continuation_count += 1;
+                                continue;
+                            }
+                        }
+                    }
                 }
 
                 // Append the final assistant message to state
@@ -475,6 +525,8 @@ struct StreamState {
     finished: bool,
     recovery_tracker: RecoveryTracker,
     effective_max_output_tokens: Option<u32>,
+    /// Counter for consecutive todo-aware continuations (prevents infinite loops).
+    todo_continuation_count: u32,
     _run_span: tracing::Span,
 }
 
@@ -507,6 +559,7 @@ impl StreamState {
             finished: false,
             recovery_tracker: RecoveryTracker::new(),
             effective_max_output_tokens,
+            todo_continuation_count: 0,
             _run_span: run_span,
         }
     }
@@ -688,6 +741,7 @@ impl StreamState {
         match next_step {
             NextStep::Continue { .. } => {
                 self.recovery_tracker.reset();
+                self.todo_continuation_count = 0;
                 self.state.messages.push(Message::Assistant {
                     content: assistant_content,
                     usage: Some(usage),
@@ -721,6 +775,52 @@ impl StreamState {
                         name: guardrail_name,
                         reason,
                     });
+                }
+
+                // Todo-aware continuation: if there are incomplete todos, inject a
+                // continuation prompt instead of terminating (max 3 consecutive continuations).
+                if self.todo_continuation_count < 3 {
+                    if let Some(ref store) = self.config.task_store {
+                        if let Ok(todos) = store.list_todos().await {
+                            let incomplete: Vec<_> = todos
+                                .iter()
+                                .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
+                                .collect();
+                            if !incomplete.is_empty() {
+                                // Append the assistant's message first
+                                self.state.messages.push(Message::Assistant {
+                                    content: assistant_content,
+                                    usage: Some(usage),
+                                });
+                                // Inject a user continuation prompt
+                                let todo_summary: Vec<String> = incomplete
+                                    .iter()
+                                    .map(|t| {
+                                        format!(
+                                            "- [{}] {}",
+                                            match t.status {
+                                                crate::task_store::TodoStatus::Pending => " ",
+                                                crate::task_store::TodoStatus::InProgress => "~",
+                                                crate::task_store::TodoStatus::Completed => "x",
+                                            },
+                                            t.content
+                                        )
+                                    })
+                                    .collect();
+                                let continuation = format!(
+                                    "You have {} incomplete todo item(s). Continue working through them:\n{}",
+                                    incomplete.len(),
+                                    todo_summary.join("\n")
+                                );
+                                self.state.messages.push(Message::User {
+                                    content: vec![ContentBlock::Text { text: continuation }],
+                                });
+                                self.state.current_turn += 1;
+                                self.todo_continuation_count += 1;
+                                return TurnOutcome::Continue;
+                            }
+                        }
+                    }
                 }
 
                 self.state.messages.push(Message::Assistant {

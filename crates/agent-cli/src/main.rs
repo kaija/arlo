@@ -16,8 +16,9 @@ use std::process;
 use std::sync::Arc;
 
 use agent_core::{
-    run, Agent, DenyAllApprovalHandler, Input, Instructions, ModelProvider, PermissionEngine,
-    PermissionMode, RunConfig, SkillRegistry, SkillTool, Tool,
+    run, Agent, DenyAllApprovalHandler, InMemoryTaskStore, Input, Instructions, ModelProvider,
+    PermissionEngine, PermissionMode, RunConfig, SkillRegistry, SkillTool, SubAgentDef,
+    SubAgentTool, TaskStore, TodoListTool, Tool,
 };
 use agent_llm::UnifiedProvider;
 use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
@@ -284,12 +285,16 @@ fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
 /// hanging on user input that will never come. The default `PermissionMode::Bypass`
 /// means most tools skip permission checks entirely, but if the mode is changed
 /// to `Normal` (e.g., via settings file loading), the handler ensures safe behavior.
+///
+/// If a `TaskStore` is provided, `SubAgentTool` instances will be constructed with
+/// task tracking enabled via `with_task_store()`.
 async fn run_single_prompt(
     provider: Arc<UnifiedProvider>,
     model: &str,
     prompt: &str,
     tools: Vec<Arc<dyn Tool>>,
     instructions: Instructions,
+    _task_store: Option<Arc<dyn TaskStore>>,
 ) -> Result<String, String> {
     let mut builder = Agent::builder("arlo").instructions(instructions);
     for tool in tools {
@@ -299,10 +304,15 @@ async fn run_single_prompt(
 
     let permissions = PermissionEngine::new(PermissionMode::Bypass);
 
-    let config = RunConfig::builder(provider.clone(), model)
+    let mut config_builder = RunConfig::builder(provider.clone(), model)
         .permissions(permissions)
-        .approval_handler(Arc::new(DenyAllApprovalHandler))
-        .build();
+        .approval_handler(Arc::new(DenyAllApprovalHandler));
+
+    if let Some(store) = _task_store {
+        config_builder = config_builder.task_store(store);
+    }
+
+    let config = config_builder.build();
 
     let input = Input::Fresh {
         prompt: prompt.to_string(),
@@ -344,7 +354,7 @@ async fn main() {
 
                 let skill_prompt = skill_registry.system_prompt_section();
                 let instructions = if skill_prompt.is_empty() {
-                    Instructions::Static(String::new())
+                    Instructions::Static("(core prompt omitted in no-provider mode)".to_string())
                 } else {
                     Instructions::Static(skill_prompt)
                 };
@@ -369,12 +379,107 @@ async fn main() {
     let mut tools = default_tools();
     tools.extend(skill_tools);
 
-    // Build instructions including available skills
+    // Create the shared TaskStore for background task tracking and todo planning
+    let task_store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+
+    // Register TodoListTool with the shared store
+    tools.push(Arc::new(TodoListTool::new(task_store.clone())));
+
+    // Register SubAgentTool for background task delegation
+    {
+        let sub_agent = Agent::builder("sub-agent")
+            .instructions(Instructions::Static(
+                "You are a background helper agent. Complete the delegated task using available tools. \
+                 Return a concise summary of your findings or actions when done.".to_string()
+            ))
+            .tool(Arc::new(ShellTool::new()))
+            .tool(Arc::new(FileReadTool::new()))
+            .tool(Arc::new(FileWriteTool::new()))
+            .tool(Arc::new(GlobTool::new()))
+            .tool(Arc::new(GrepTool::new()))
+            .build();
+
+        let sub_agent_def = SubAgentDef {
+            agent: Arc::new(sub_agent),
+            tool_name: Some("sub_agent".to_string()),
+            tool_description: Some(
+                "Spawn a background sub-agent to handle a delegated task. The sub-agent runs \
+                 independently with access to shell, file, and search tools. Its progress is \
+                 tracked and you'll be notified when it completes.".to_string()
+            ),
+            input_schema: None,
+            max_turns: Some(15),
+            background: true,
+            allowed_tools: None,
+        };
+
+        let sub_agent_config = RunConfig::builder(provider.clone(), &model)
+            .permissions(PermissionEngine::new(PermissionMode::Bypass))
+            .approval_handler(Arc::new(DenyAllApprovalHandler))
+            .max_turns(15)
+            .build();
+
+        tools.push(Arc::new(SubAgentTool::with_task_store(
+            sub_agent_def,
+            sub_agent_config,
+            task_store.clone(),
+        )));
+    }
+
+    // Core agent system prompt — defines autonomous behavior
+    let core_prompt = "\
+You are arlo, an autonomous coding agent running in the user's terminal. You have access to tools for file operations, shell commands, web search, and planning.
+
+## Task Approach
+
+- When given a task, break it into steps and execute each step using available tools. Do not stop after planning — work through the plan.
+- Use the todolist tool to track multi-step work: add items, mark them in_progress as you work, and mark completed when done.
+- After creating a plan, immediately begin executing the first item. Continue until all items are complete or you need user input.
+- Mark each sub-task as completed immediately upon finishing — do not batch completions.
+- When given an unclear instruction, interpret it in the context of the current environment and prior conversation.
+- Do not propose changes on material you haven't reviewed. Examine existing state before suggesting modifications.
+- If an approach fails, diagnose why before switching tactics — review the error, check assumptions, try a focused fix. Don't retry identically, but don't abandon a viable approach after a single failure either.
+
+## Tool Usage
+
+Using dedicated tools allows the user to better understand and review your work. This is CRITICAL:
+- To read files, use file_read instead of cat, head, tail, or sed
+- To create or edit files, use file_write instead of cat with heredoc, echo, or sed/awk
+- To search for files by name/pattern, use glob instead of find or ls
+- To search file contents, use grep instead of shell grep or rg
+- Reserve shell exclusively for system commands and terminal operations that require shell execution (installing packages, running builds/tests, git operations, process management)
+
+Additional tool guidance:
+- When multiple tool calls are independent, make them in parallel for efficiency.
+- If a tool call fails, diagnose why before retrying. Don't retry the identical action blindly.
+
+## Scope & Communication
+
+- Do exactly what was asked. Don't add extras, reorganize surrounding material, or make improvements beyond the request.
+- Don't create unnecessary structure or abstractions for one-time operations.
+- Prefer modifying what already exists over creating new artifacts.
+- Go straight to the point. Lead with the action, not the reasoning. Skip filler.
+- If you need clarification or are blocked, ask the user directly.
+- For destructive or irreversible actions (deleting files, modifying shared configs, publishing), confirm with the user first.
+
+## Sub-Agent Delegation
+
+- Use the sub_agent tool to delegate independent research or background tasks that don't need your immediate attention.
+- The sub-agent runs in the background — you'll be notified when it completes.
+- Continue working on other items while background tasks run.
+
+## Safety
+
+- Freely take local, reversible actions (editing files, running queries, reading data).
+- For actions that are hard to reverse, affect shared systems, or could be destructive, check with the user before proceeding.
+";
+
+    // Build instructions: core prompt + available skills (if any)
     let skill_prompt = skill_registry.system_prompt_section();
     let instructions = if skill_prompt.is_empty() {
-        Instructions::Static(String::new())
+        Instructions::Static(core_prompt.to_string())
     } else {
-        Instructions::Static(skill_prompt)
+        Instructions::Static(format!("{}\n{}", core_prompt, skill_prompt))
     };
 
     // Handle --dump-prompt: print everything and exit
@@ -389,7 +494,16 @@ async fn main() {
     match cli.prompt {
         Some(prompt_text) => {
             // Single-prompt mode: run, print, exit
-            match run_single_prompt(provider, &model, &prompt_text, tools, instructions).await {
+            match run_single_prompt(
+                provider,
+                &model,
+                &prompt_text,
+                tools,
+                instructions,
+                Some(task_store),
+            )
+            .await
+            {
                 Ok(output) => {
                     println!("{}", output);
                 }
@@ -406,7 +520,16 @@ async fn main() {
             } else {
                 PermissionMode::Normal
             };
-            if let Err(e) = tui::run_tui_repl(provider, &model, tools, instructions, permission_mode).await {
+            if let Err(e) = tui::run_tui_repl(
+                provider,
+                &model,
+                tools,
+                instructions,
+                permission_mode,
+                task_store,
+            )
+            .await
+            {
                 eprintln!("{}", e);
                 process::exit(1);
             }

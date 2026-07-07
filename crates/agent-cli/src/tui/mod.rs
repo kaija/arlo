@@ -1,7 +1,9 @@
 pub mod app;
 pub mod approval;
+pub mod commands;
 pub mod event_loop;
 pub mod input;
+pub mod notifications;
 pub mod render;
 
 use std::io::{self, stdout};
@@ -16,7 +18,7 @@ use tokio::sync::mpsc;
 
 use agent_core::{
     run_stream, Agent, ApprovalResponse, ContentBlock, Input, Instructions, Message,
-    PermissionEngine, PermissionMode, RunConfig, Tool,
+    PermissionEngine, PermissionMode, RunConfig, TaskStore, Tool,
 };
 use agent_llm::UnifiedProvider;
 
@@ -34,6 +36,7 @@ pub async fn run_tui_repl(
     tools: Vec<Arc<dyn Tool>>,
     instructions: Instructions,
     permission_mode: PermissionMode,
+    _task_store: Arc<dyn TaskStore>,
 ) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -58,7 +61,10 @@ pub async fn run_tui_repl(
 
     // Initialize application state with permission engine
     let permissions = PermissionEngine::new(permission_mode);
-    let mut state = AppState::new(permissions.clone());
+    let mut state = AppState::new(permissions.clone(), Some(_task_store.clone()));
+
+    // Keep a reference to task_store for RunConfig building
+    let task_store = _task_store;
 
     // Spawn the terminal poller ONCE — it lives for the entire session.
     // This avoids the race condition where aborting/re-spawning a blocking
@@ -89,7 +95,16 @@ pub async fn run_tui_repl(
             }
         };
 
+        // Check if event is a Tick before consuming it in update()
+        let is_tick = matches!(&event, app::AppEvent::Tick);
+
         let result = state.update(event);
+
+        // Poll notifications on Tick when mode is Running or Idle (Requirement 3.3, 5.5)
+        if is_tick && matches!(state.mode, AppMode::Running | AppMode::Idle) {
+            notifications::poll_notifications(&mut state).await;
+        }
+
         match result {
             UpdateResult::Continue => {}
             UpdateResult::StartRun(prompt) => {
@@ -117,10 +132,11 @@ pub async fn run_tui_repl(
                 }
                 let agent = builder.build();
 
-                // Build run config with approval handler
+                // Build run config with approval handler and task store
                 let config = RunConfig::builder(provider.clone(), model)
                     .permissions(state.permissions.clone())
                     .approval_handler(approval_handler.clone())
+                    .task_store(task_store.clone())
                     .build();
 
                 // Create run stream with full conversation history
@@ -163,10 +179,11 @@ pub async fn run_tui_repl(
                 }
                 let agent = builder.build();
 
-                // Build run config with approval handler
+                // Build run config with approval handler and task store
                 let config = RunConfig::builder(provider.clone(), model)
                     .permissions(state.permissions.clone())
                     .approval_handler(approval_handler.clone())
+                    .task_store(task_store.clone())
                     .build();
 
                 // Create new run stream to resume
