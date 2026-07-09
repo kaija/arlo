@@ -1,7 +1,6 @@
 //! 3-layer memory compaction system.
 //!
-//! Replaces the single-pipeline `ContextCompactor` with a trait-based pipeline
-//! that executes layers in order from lightest to heaviest:
+//! A trait-based pipeline that executes layers in order from lightest to heaviest:
 //!
 //! 1. **Tools Compact** — clears stale tool results (zero cost)
 //! 2. **Session Memory** — injects session memory file (zero cost)
@@ -17,9 +16,18 @@ pub mod tools_compact;
 pub mod session_memory;
 pub mod tokens;
 
-// Re-export core types for convenient access.
-// Note: CompactionEvent is reused from the existing `compactor` module.
-pub use crate::compactor::CompactionEvent;
+/// Event returned when compaction modifies the message history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionEvent {
+    /// Name of the stage that was applied (e.g., "tools_compact", "full_summarize").
+    pub stage: String,
+    /// Number of messages removed or affected.
+    pub messages_affected: usize,
+    /// Estimated token count before compaction.
+    pub tokens_before: usize,
+    /// Estimated token count after compaction.
+    pub tokens_after: usize,
+}
 
 use crate::message::Message;
 use crate::model::Model;

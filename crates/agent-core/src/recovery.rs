@@ -20,7 +20,7 @@ pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// the tracker returns a GiveUp strategy.
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryTracker {
-    attempts: HashMap<String, u32>,
+    attempts: HashMap<&'static str, u32>,
 }
 
 impl RecoveryTracker {
@@ -38,7 +38,7 @@ impl RecoveryTracker {
     /// strategy for the error type.
     pub fn resolve_strategy(&mut self, error: &ModelError) -> RecoveryStrategy {
         let variant_key = error_variant_key(error);
-        let count = self.attempts.entry(variant_key.clone()).or_insert(0);
+        let count = self.attempts.entry(variant_key).or_insert(0);
         *count += 1;
 
         if *count > MAX_RECOVERY_ATTEMPTS {
@@ -55,8 +55,7 @@ impl RecoveryTracker {
 
     /// Get the current attempt count for a given error variant.
     pub fn attempts_for(&self, error: &ModelError) -> u32 {
-        let key = error_variant_key(error);
-        self.attempts.get(&key).copied().unwrap_or(0)
+        self.attempts.get(error_variant_key(error)).copied().unwrap_or(0)
     }
 
     /// Get the current attempt count for a given variant key string.
@@ -65,8 +64,8 @@ impl RecoveryTracker {
     }
 
     /// Increment the attempt counter for a given variant key string.
-    pub fn increment_key(&mut self, key: &str) {
-        let count = self.attempts.entry(key.to_string()).or_insert(0);
+    pub fn increment_key(&mut self, key: &'static str) {
+        let count = self.attempts.entry(key).or_insert(0);
         *count += 1;
     }
 
@@ -105,14 +104,14 @@ fn map_error_to_strategy(error: &ModelError, attempt: u32) -> RecoveryStrategy {
 }
 
 /// Extract a string key from the error variant for tracking purposes.
-fn error_variant_key(error: &ModelError) -> String {
+fn error_variant_key(error: &ModelError) -> &'static str {
     match error {
-        ModelError::Api { .. } => "Api".to_string(),
-        ModelError::RateLimited { .. } => "RateLimited".to_string(),
-        ModelError::PromptTooLong { .. } => "PromptTooLong".to_string(),
-        ModelError::MaxOutputTokens => "MaxOutputTokens".to_string(),
-        ModelError::Connection(_) => "Connection".to_string(),
-        ModelError::StreamInterrupted(_) => "StreamInterrupted".to_string(),
+        ModelError::Api { .. } => "Api",
+        ModelError::RateLimited { .. } => "RateLimited",
+        ModelError::PromptTooLong { .. } => "PromptTooLong",
+        ModelError::MaxOutputTokens => "MaxOutputTokens",
+        ModelError::Connection(_) => "Connection",
+        ModelError::StreamInterrupted(_) => "StreamInterrupted",
     }
 }
 
