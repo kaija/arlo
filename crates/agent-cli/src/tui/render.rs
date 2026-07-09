@@ -306,7 +306,23 @@ fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
 
 /// Render the status bar showing mode indicator, activity status, and token usage.
 fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
+    // Background tasks still running mean the session isn't truly idle —
+    // surface that in the mode badge instead of showing a green IDLE.
+    let bg_running = state
+        .task_store
+        .as_ref()
+        .and_then(|store| block_on_async(store.count_by_status()).ok())
+        .map(|counts| counts.running)
+        .unwrap_or(0);
+
     let mode_span = match state.mode {
+        AppMode::Idle if bg_running > 0 => Span::styled(
+            format!(" IDLE · {} BG RUNNING ", bg_running),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         AppMode::Idle => Span::styled(
             " IDLE ",
             Style::default()

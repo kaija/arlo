@@ -3,7 +3,7 @@
 // Polls the TaskStore for unacknowledged terminal tasks and formats them
 // as OutputSpan entries for display in the output buffer.
 
-use agent_core::{TaskEntry, TaskStatus};
+use agent_core::{ContentBlock, Message, TaskEntry, TaskStatus};
 
 use super::app::{AppState, OutputSpan, SpanStyle};
 
@@ -68,7 +68,20 @@ pub async fn poll_notifications(state: &mut AppState) {
 
     for task in &tasks {
         let span = format_task_notification(task);
-        state.output_buffer.push(span);
+
+        // Record the result in conversation history so the model sees the
+        // sub-agent's output on the next turn — without this the result is
+        // only ever printed, never returned to the agent.
+        state.history.push(Message::User {
+            content: vec![ContentBlock::Text {
+                text: format!("[background task update] {}", span.text),
+            }],
+        });
+
+        state.output_buffer.push(OutputSpan {
+            text: format!("\n{}\n", span.text),
+            style: span.style,
+        });
 
         // Acknowledge immediately to prevent duplicate notifications on next tick
         let _ = store.acknowledge_task(&task.id).await;

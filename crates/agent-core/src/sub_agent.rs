@@ -198,8 +198,20 @@ impl SubAgentTool {
                         tracing::warn!(error = %e, task_id = %task_id, "Failed to transition task to Running");
                     }
 
-                    // Execute sub-agent
-                    match run(&agent, sub_input, &sub_config).await {
+                    // Execute the sub-agent on its own task so a panic inside the
+                    // run can't kill this bookkeeping task — otherwise the store
+                    // entry would be stuck in Running forever with no notification.
+                    let outcome =
+                        tokio::spawn(async move { run(&agent, sub_input, &sub_config).await })
+                            .await
+                            .unwrap_or_else(|join_err| {
+                                Err(crate::error::RunError::Aborted(format!(
+                                    "sub-agent task panicked: {}",
+                                    join_err
+                                )))
+                            });
+
+                    match outcome {
                         Ok(result) => {
                             // Transition to Completed with output
                             if let Err(e) = store
