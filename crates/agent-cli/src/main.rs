@@ -21,7 +21,7 @@ use agent_core::{
     SubAgentTool, TaskStore, TodoListTool, Tool,
 };
 use agent_llm::UnifiedProvider;
-use agent_tools::{FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
+use agent_tools::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
 
 /// Parsed CLI options.
 struct CliArgs {
@@ -119,6 +119,7 @@ fn default_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ShellTool::new()),
         Arc::new(FileReadTool::new()),
         Arc::new(FileWriteTool::new()),
+        Arc::new(FileEditTool::new()),
         Arc::new(GlobTool::new()),
         Arc::new(GrepTool::new()),
         Arc::new(WebFetchTool::new()),
@@ -395,6 +396,7 @@ async fn main() {
             .tool(Arc::new(ShellTool::new()))
             .tool(Arc::new(FileReadTool::new()))
             .tool(Arc::new(FileWriteTool::new()))
+            .tool(Arc::new(FileEditTool::new()))
             .tool(Arc::new(GlobTool::new()))
             .tool(Arc::new(GrepTool::new()))
             .build();
@@ -444,7 +446,8 @@ You are arlo, an autonomous coding agent running in the user's terminal. You hav
 
 Using dedicated tools allows the user to better understand and review your work. This is CRITICAL:
 - To read files, use file_read instead of cat, head, tail, or sed
-- To create or edit files, use file_write instead of cat with heredoc, echo, or sed/awk
+- To create a new file or fully rewrite one, use file_write instead of cat with heredoc, echo, or sed/awk
+- To change part of an existing file, use file_edit (exact string replacement) instead of rewriting the whole file with file_write. For long documents, build them up with multiple file_edit calls (e.g. write a skeleton, then edit in each section) rather than emitting the entire file in one call
 - To search for files by name/pattern, use glob instead of find or ls
 - To search file contents, use grep instead of shell grep or rg
 - Reserve shell exclusively for system commands and terminal operations that require shell execution (installing packages, running builds/tests, git operations, process management)
