@@ -1,7 +1,7 @@
 //! Agent configuration and builder pattern for defining autonomous agents.
 //!
 //! The `Agent` struct is the top-level configuration defining an agent's behavior,
-//! tools, instructions, sub-agents, guardrails, and lifecycle hooks.
+//! tools, instructions, sub-agents, and guardrails.
 //! Constructed via the builder pattern: `Agent::builder("name")`.
 
 use std::fmt;
@@ -14,7 +14,7 @@ use crate::guardrail::{InputGuardrail, OutputGuardrail};
 use crate::state::RunState;
 use crate::tool::Tool;
 
-/// Context provided to dynamic instructions and lifecycle hooks during execution.
+/// Context provided to dynamic instructions during execution.
 ///
 /// Contains run-scoped information needed for context-aware behaviors.
 #[derive(Debug, Clone)]
@@ -55,38 +55,6 @@ impl Clone for Instructions {
 impl Default for Instructions {
     fn default() -> Self {
         Instructions::Static(String::new())
-    }
-}
-
-/// Lifecycle hook callback type.
-///
-/// Hooks receive the current `RunContext` and return a boxed future.
-pub type HookCallback = Arc<dyn Fn(&RunContext) -> BoxFuture<'static, ()> + Send + Sync>;
-
-/// Optional lifecycle hooks that fire during agent execution.
-///
-/// All hooks are optional. When set, they are invoked at the corresponding
-/// point in the RunLoop lifecycle.
-#[derive(Clone, Default)]
-pub struct AgentHooks {
-    /// Called at the start of each turn.
-    pub on_turn_start: Option<HookCallback>,
-    /// Called at the end of each turn.
-    pub on_turn_end: Option<HookCallback>,
-    /// Called before a tool starts executing.
-    pub on_tool_start: Option<HookCallback>,
-    /// Called after a tool finishes executing.
-    pub on_tool_end: Option<HookCallback>,
-}
-
-impl fmt::Debug for AgentHooks {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AgentHooks")
-            .field("on_turn_start", &self.on_turn_start.is_some())
-            .field("on_turn_end", &self.on_turn_end.is_some())
-            .field("on_tool_start", &self.on_tool_start.is_some())
-            .field("on_tool_end", &self.on_tool_end.is_some())
-            .finish()
     }
 }
 
@@ -152,8 +120,6 @@ pub struct Agent {
     pub output_schema: Option<serde_json::Value>,
     /// Optional maximum turns override (takes precedence over RunConfig).
     pub max_turns: Option<u32>,
-    /// Lifecycle hooks for this agent.
-    pub hooks: AgentHooks,
 }
 
 impl fmt::Debug for Agent {
@@ -168,7 +134,6 @@ impl fmt::Debug for Agent {
             .field("output_guardrails_count", &self.output_guardrails.len())
             .field("output_schema", &self.output_schema)
             .field("max_turns", &self.max_turns)
-            .field("hooks", &self.hooks)
             .finish()
     }
 }
@@ -188,7 +153,6 @@ impl Agent {
             output_guardrails: Vec::new(),
             output_schema: None,
             max_turns: None,
-            hooks: AgentHooks::default(),
         }
     }
 }
@@ -207,7 +171,6 @@ pub struct AgentBuilder {
     output_guardrails: Vec<Arc<dyn OutputGuardrail>>,
     output_schema: Option<serde_json::Value>,
     max_turns: Option<u32>,
-    hooks: AgentHooks,
 }
 
 impl AgentBuilder {
@@ -259,12 +222,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the lifecycle hooks for this agent.
-    pub fn hooks(mut self, hooks: AgentHooks) -> Self {
-        self.hooks = hooks;
-        self
-    }
-
     /// Consume the builder and produce an `Agent`.
     ///
     /// Defaults:
@@ -276,7 +233,6 @@ impl AgentBuilder {
     /// - `output_guardrails` → empty Vec
     /// - `output_schema` → `None`
     /// - `max_turns` → `None`
-    /// - `hooks` → all `None`
     pub fn build(self) -> Agent {
         Agent {
             name: self.name,
@@ -288,7 +244,6 @@ impl AgentBuilder {
             output_guardrails: self.output_guardrails,
             output_schema: self.output_schema,
             max_turns: self.max_turns,
-            hooks: self.hooks,
         }
     }
 }
@@ -373,10 +328,6 @@ mod tests {
         assert!(agent.output_guardrails.is_empty());
         assert_eq!(agent.output_schema, None);
         assert_eq!(agent.max_turns, None);
-        assert!(agent.hooks.on_turn_start.is_none());
-        assert!(agent.hooks.on_turn_end.is_none());
-        assert!(agent.hooks.on_tool_start.is_none());
-        assert!(agent.hooks.on_tool_end.is_none());
     }
 
     #[test]
@@ -398,13 +349,6 @@ mod tests {
             allowed_tools: Some(vec!["read_file".to_string()]),
         };
 
-        let hooks = AgentHooks {
-            on_turn_start: Some(Arc::new(|_ctx| Box::pin(async {}))),
-            on_turn_end: None,
-            on_tool_start: None,
-            on_tool_end: None,
-        };
-
         let agent = Agent::builder("full-agent")
             .instructions(Instructions::Static("Be helpful.".into()))
             .model("claude-sonnet-4-20250514")
@@ -414,7 +358,6 @@ mod tests {
             .output_guardrail(output_guard)
             .output_schema(json!({"type": "object", "properties": {"answer": {"type": "string"}}}))
             .max_turns(10)
-            .hooks(hooks)
             .build();
 
         assert_eq!(agent.name, "full-agent");
@@ -428,7 +371,6 @@ mod tests {
         assert_eq!(agent.output_guardrails.len(), 1);
         assert!(agent.output_schema.is_some());
         assert_eq!(agent.max_turns, Some(10));
-        assert!(agent.hooks.on_turn_start.is_some());
     }
 
     #[test]
@@ -540,42 +482,8 @@ mod tests {
         assert!(matches!(inst, Instructions::Static(ref s) if s.is_empty()));
     }
 
-    #[test]
-    fn agent_hooks_default() {
-        let hooks = AgentHooks::default();
-        assert!(hooks.on_turn_start.is_none());
-        assert!(hooks.on_turn_end.is_none());
-        assert!(hooks.on_tool_start.is_none());
-        assert!(hooks.on_tool_end.is_none());
-    }
 
-    #[test]
-    fn agent_hooks_debug() {
-        let hooks = AgentHooks {
-            on_turn_start: Some(Arc::new(|_ctx| Box::pin(async {}))),
-            on_turn_end: None,
-            on_tool_start: None,
-            on_tool_end: Some(Arc::new(|_ctx| Box::pin(async {}))),
-        };
-        let debug = format!("{:?}", hooks);
-        assert!(debug.contains("on_turn_start: true"));
-        assert!(debug.contains("on_turn_end: false"));
-        assert!(debug.contains("on_tool_start: false"));
-        assert!(debug.contains("on_tool_end: true"));
-    }
 
-    #[test]
-    fn agent_hooks_clone() {
-        let hooks = AgentHooks {
-            on_turn_start: Some(Arc::new(|_ctx| Box::pin(async {}))),
-            on_turn_end: None,
-            on_tool_start: None,
-            on_tool_end: None,
-        };
-        let cloned = hooks.clone();
-        assert!(cloned.on_turn_start.is_some());
-        assert!(cloned.on_turn_end.is_none());
-    }
 
     #[test]
     fn sub_agent_def_debug() {

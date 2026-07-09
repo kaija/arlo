@@ -71,11 +71,6 @@ impl StreamingToolExecutor {
         }
     }
 
-    /// Create a new executor with the default max concurrency of 8.
-    pub fn default_concurrency() -> Self {
-        Self::new(8)
-    }
-
     /// Enqueue a tool for execution.
     ///
     /// The tool's concurrency classification is determined from the input.
@@ -156,38 +151,6 @@ impl StreamingToolExecutor {
                 result: r.result,
             })
             .collect()
-    }
-
-    /// Await the next pending tool to complete.
-    ///
-    /// Returns `Some(ToolResult)` if there are pending tools, `None` if empty.
-    pub async fn next_remaining(&mut self) -> Option<ToolResult> {
-        if self.pending.is_empty() {
-            return None;
-        }
-
-        // Wait for any one pending task to complete
-        let (result, _index, remaining) =
-            futures::future::select_all(self.pending.drain(..)).await;
-        self.pending = remaining;
-
-        match result {
-            Ok(indexed) => {
-                let tool_result = ToolResult {
-                    tool_use_id: indexed.tool_use_id,
-                    tool_name: indexed.tool_name,
-                    result: indexed.result,
-                };
-                Some(tool_result)
-            }
-            Err(_join_err) => Some(ToolResult {
-                tool_use_id: String::new(),
-                tool_name: String::new(),
-                result: Err(ToolError::ExecutionFailed(
-                    "Task panicked".to_string(),
-                )),
-            }),
-        }
     }
 
     /// Spawn safe tools from the batch up to max_concurrency.
@@ -487,12 +450,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_concurrency() {
-        let exec = StreamingToolExecutor::default_concurrency();
-        assert_eq!(exec.max_concurrency, 8);
-    }
-
-    #[tokio::test]
     async fn test_single_safe_tool() {
         let mut exec = StreamingToolExecutor::new(8);
         let tool: Arc<dyn Tool> = Arc::new(SafeTool {
@@ -692,13 +649,6 @@ mod tests {
             self.current_concurrent.fetch_sub(1, Ordering::SeqCst);
             Ok(ToolOutput::Text(format!("done:{}", self.tool_name)))
         }
-    }
-
-    #[tokio::test]
-    async fn test_next_remaining_returns_none_when_empty() {
-        let mut exec = StreamingToolExecutor::new(8);
-        let result = exec.next_remaining().await;
-        assert!(result.is_none());
     }
 
     #[tokio::test]

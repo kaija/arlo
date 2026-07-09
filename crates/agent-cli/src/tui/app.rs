@@ -780,16 +780,12 @@ impl AppState {
             } => {
                 // Append assistant response to conversation history
                 self.history.push(Message::Assistant {
-                    content: vec![ContentBlock::Text { text: output.clone() }],
+                    content: vec![ContentBlock::Text { text: output }],
                     usage: Some(usage.clone()),
                 });
 
-                if !output.is_empty() {
-                    self.output_buffer.push(OutputSpan {
-                        text: output,
-                        style: SpanStyle::Normal,
-                    });
-                }
+                // The response text already streamed in via StreamChunk::TextDelta
+                // events, so it is not re-appended here.
                 // Add separator after response
                 self.output_buffer.push(OutputSpan {
                     text: "\n".to_string(),
@@ -847,10 +843,7 @@ impl AppState {
             }
 
             // Non-terminal events we don't surface in the TUI
-            RunEvent::SubAgentStart { .. }
-            | RunEvent::SubAgentEnd { .. }
-            | RunEvent::Compaction { .. }
-            | RunEvent::StepResolved(_) => {}
+            RunEvent::Compaction { .. } | RunEvent::StepResolved(_) => {}
         }
 
         UpdateResult::Continue
@@ -1032,8 +1025,8 @@ mod tests {
         let usage = state.last_usage.as_ref().unwrap();
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
-        // Final output should be in the buffer
-        assert!(state.output_buffer.iter().any(|s| s.text == "All done!"));
+        // Final output is not re-appended — it already streamed via TextDelta.
+        assert!(!state.output_buffer.iter().any(|s| s.text == "All done!"));
     }
 
     #[test]
@@ -1095,19 +1088,6 @@ mod tests {
         assert_eq!(state.mode, AppMode::Running);
     }
 
-    #[test]
-    fn sub_agent_events_are_ignored() {
-        let mut state = make_state();
-        state.update(AppEvent::AgentEvent(RunEvent::SubAgentStart {
-            agent: "sub".to_string(),
-            task: "do stuff".to_string(),
-        }));
-        state.update(AppEvent::AgentEvent(RunEvent::SubAgentEnd {
-            agent: "sub".to_string(),
-            output: "done".to_string(),
-        }));
-        assert!(state.output_buffer.is_empty());
-    }
 
     #[test]
     fn compaction_is_ignored() {

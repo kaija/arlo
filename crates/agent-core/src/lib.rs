@@ -2,7 +2,6 @@
 
 pub mod agent;
 pub mod compaction;
-pub mod compactor;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -25,31 +24,24 @@ pub mod in_memory_task_store;
 pub mod todolist_tool;
 pub mod tool;
 
-pub use agent::{
-    Agent, AgentBuilder, AgentHooks, BoxFuture, HookCallback, Instructions, RunContext,
-    SubAgentDef,
-};
+pub use agent::{Agent, AgentBuilder, BoxFuture, Instructions, RunContext, SubAgentDef};
 pub use config::{ApprovalContext, ApprovalHandler, ApprovalResponse, DenyAllApprovalHandler, Input, RunConfig, RunConfigBuilder, RunResult};
 pub use error::{ModelError, RunError, ToolError};
 pub use event::{RunEvent, RunStream};
 pub use guardrail::{GuardrailResult, InputGuardrail, OutputGuardrail, ToolGuardrail};
 pub use message::{ContentBlock, Message, ToolUseBlock, Usage};
 pub use model::{Model, ModelProvider, ModelRequest, ModelResponse, ModelStream, ToolDefinition};
-pub use next_step::{ContinueReason, NextStep, PendingApproval, RecoveryStrategy};
+pub use next_step::{NextStep, PendingApproval, RecoveryStrategy};
 pub use permission::{PermissionDecision, PermissionEngine, PermissionMode};
 pub use state::{CompactionState, RunState, SCHEMA_VERSION};
 pub use stream::{StopReason, StreamChunk};
 pub use tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
-pub use compactor::{
-    CompactionConfig, CompactionEvent, CompactionFn, CompactionStage, ContextCompactor,
-};
-
 pub use compaction::{
     config::CompactionLayerConfig,
     layer::{CompactionContext, CompactionLayer, LayerResult},
     tokens::{compute_token_count, estimate_tokens},
-    CompactionPipeline,
+    CompactionEvent, CompactionPipeline,
 };
 
 pub use executor::{StreamingToolExecutor, ToolResult};

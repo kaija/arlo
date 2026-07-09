@@ -1,21 +1,22 @@
 //! Main loop (RunLoop) implementation: `run()` and `run_stream()` entry points.
 //!
-//! Implements the streaming-first main loop that executes phases in order:
-//! context compaction → prepare request → stream model + execute tools →
-//! drain remaining tools → resolve next step → apply state transition.
+//! Both entry points share a single implementation (`drive`) that executes
+//! phases in order: context compaction → prepare request → stream model →
+//! execute tools → resolve next step → apply state transition. When driven
+//! through `run_stream`, `drive` emits `RunEvent`s over a channel as each
+//! phase happens (including per-chunk `StreamChunk` events).
 
 use std::sync::Arc;
 
-use futures::stream;
-use futures::StreamExt;
+use futures::{stream, StreamExt};
+use tokio::sync::mpsc;
 use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::agent::{Agent, Instructions, RunContext};
 use crate::compaction::config::CompactionLayerConfig;
-use crate::compaction::tokens::compute_token_count;
+use crate::compaction::tokens::{compute_token_count, estimate_tokens};
 use crate::compaction::CompactionPipeline;
-use crate::compactor::{CompactionConfig, CompactionStage, ContextCompactor};
 use crate::config::{ApprovalContext, ApprovalResponse, Input, RunConfig, RunResult};
 use crate::error::RunError;
 use crate::event::{RunEvent, RunStream};
@@ -23,7 +24,7 @@ use crate::executor::StreamingToolExecutor;
 use crate::guardrail::{InputGuardrail, OutputGuardrail};
 use crate::message::{ContentBlock, Message, ToolUseBlock, Usage};
 use crate::model::{ModelRequest, ToolDefinition};
-use crate::next_step::{ContinueReason, NextStep, PendingApproval, RecoveryStrategy};
+use crate::next_step::{NextStep, PendingApproval, RecoveryStrategy};
 use crate::permission::PermissionDecision;
 use crate::recovery::RecoveryTracker;
 use crate::state::RunState;
@@ -44,6 +45,54 @@ use crate::tool::{ToolContext, ToolOutput};
 /// # Returns
 /// `Ok(RunResult)` on successful completion, `Err(RunError)` on failure.
 pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunResult, RunError> {
+    drive(agent, input, config, None).await
+}
+
+/// Run an agent and return a stream of `RunEvent`s.
+///
+/// This is the streaming entry point. The run executes on a background task
+/// and yields events as each phase happens: `TurnStart`, `StreamChunk` (per
+/// model chunk), `Compaction`, `ToolStart`/`ToolEnd`, `StepResolved`, and
+/// exactly one terminal event (`AgentEnd`, `MaxTurns`, `Aborted`, `Error`,
+/// `Interruption`, or `GuardrailTripped`).
+///
+/// Dropping the returned stream stops the run at the next event emission.
+pub fn run_stream(agent: &Agent, input: Input, config: &RunConfig) -> RunStream {
+    let agent = agent.clone();
+    let config = config.clone();
+    let (tx, rx) = mpsc::channel(256);
+
+    tokio::spawn(async move {
+        // Terminal outcome is reported via events; the result is redundant here.
+        let _ = drive(&agent, input, &config, Some(&tx)).await;
+    });
+
+    Box::pin(stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    }))
+}
+
+/// Send an event to the stream consumer, if one is attached.
+///
+/// Returns `false` when the consumer dropped the stream (channel closed).
+async fn emit(tx: Option<&mpsc::Sender<RunEvent>>, event: RunEvent) -> bool {
+    match tx {
+        Some(tx) => tx.send(event).await.is_ok(),
+        None => true,
+    }
+}
+
+/// The single RunLoop implementation backing both `run` and `run_stream`.
+///
+/// When `tx` is `Some`, phase events are emitted as they happen and the
+/// terminal outcome is emitted as exactly one terminal `RunEvent` before
+/// returning.
+async fn drive(
+    agent: &Agent,
+    input: Input,
+    config: &RunConfig,
+    tx: Option<&mpsc::Sender<RunEvent>>,
+) -> Result<RunResult, RunError> {
     // Clone config to allow mutable access for session grants (AlwaysAllow responses)
     let mut config = config.clone();
 
@@ -60,16 +109,19 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
     );
 
     // Resolve the model
-    let model = config.provider.resolve(&config.model).await?;
+    let model = match config.provider.resolve(&config.model).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "model_resolution_error");
+            emit(tx, RunEvent::Error { error: format!("{}", e) }).await;
+            return Err(RunError::Model(e));
+        }
+    };
 
     // Determine effective max_turns (agent override takes precedence)
     let max_turns = agent.max_turns.unwrap_or(config.max_turns);
 
-    // Optional compaction config — for now use a basic default if agent has one
-    // Later tasks (8.5, 8.6) will wire guardrails and budget here
-    let _compactor = ContextCompactor::new(CompactionConfig::default());
-
-    // New 4-layer compaction pipeline (replaces single-step compactor)
+    // 4-layer compaction pipeline
     let mut pipeline = CompactionPipeline::new(CompactionLayerConfig::default());
 
     // Recovery tracker for error-to-strategy mapping and attempt counting
@@ -85,10 +137,24 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
     loop {
         // Phase 0: Check turn limit
         if state.current_turn >= max_turns {
-            return Ok(build_result_max_turns(&state, max_turns));
+            emit(tx, RunEvent::MaxTurns { count: max_turns }).await;
+            return Ok(build_result_max_turns(&state));
         }
 
         tracing::info!(turn = state.current_turn, "turn_start");
+        // The only place we check for a dropped stream consumer — once per turn
+        // is enough to stop abandoned runs without threading the check everywhere.
+        if !emit(
+            tx,
+            RunEvent::TurnStart {
+                turn: state.current_turn + 1,
+                agent: agent.name.clone(),
+            },
+        )
+        .await
+        {
+            return Err(RunError::Aborted("stream_dropped".to_string()));
+        }
 
         // Phase 1: Context compaction (4-layer pipeline)
         let token_count = compute_token_count(
@@ -98,7 +164,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                 _ => None,
             }),
         );
-        let _compaction_event = pipeline
+        let compaction_event = pipeline
             .compact(
                 &mut state.messages,
                 &mut state.compaction_state,
@@ -109,6 +175,16 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                 Some(model.as_ref()),
             )
             .await;
+        if let Some(ce) = compaction_event {
+            emit(
+                tx,
+                RunEvent::Compaction {
+                    stage: ce.stage,
+                    messages_removed: ce.messages_affected,
+                },
+            )
+            .await;
+        }
 
         // Phase 1.5: Input guardrails (first turn only)
         if state.current_turn == 0 {
@@ -116,6 +192,14 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                 check_input_guardrails(&agent.input_guardrails, &state.messages).await
             {
                 tracing::error!(guardrail = %guardrail_name, reason = %reason, "input_guardrail_tripped");
+                emit(
+                    tx,
+                    RunEvent::GuardrailTripped {
+                        name: guardrail_name.clone(),
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
                 return Err(RunError::Guardrail(format!(
                     "{}: {}",
                     guardrail_name, reason
@@ -135,8 +219,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             output_schema: agent.output_schema.clone(),
         };
 
-        // Phase 3: Stream model response + execute tools concurrently
-        // Handle model errors via recovery system
+        // Phase 3: Stream model response, handling errors via the recovery system
         let model_call_span = tracing::info_span!("model.call", model = %model.name());
         let model_stream = match model.stream(request).instrument(model_call_span).await {
             Ok(s) => s,
@@ -150,7 +233,8 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                     model.as_ref(),
                 ) {
                     RecoveryOutcome::Retry => continue,
-                    RecoveryOutcome::GiveUp(_error) => {
+                    RecoveryOutcome::GiveUp(error) => {
+                        emit(tx, RunEvent::Error { error }).await;
                         return Err(RunError::RecoveryExhausted(
                             recovery_tracker.attempts_for(&model_error),
                         ));
@@ -160,7 +244,7 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
         };
 
         let (assistant_content, stop_reason, usage, tool_uses) =
-            match consume_stream(model_stream).await {
+            match consume_stream(model_stream, tx).await {
                 Ok(r) => r,
                 Err(RunError::Model(model_error)) => {
                     tracing::error!(error = %model_error, "model_stream_error");
@@ -172,19 +256,48 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                         model.as_ref(),
                     ) {
                         RecoveryOutcome::Retry => continue,
-                        RecoveryOutcome::GiveUp(_error) => {
+                        RecoveryOutcome::GiveUp(error) => {
+                            emit(tx, RunEvent::Error { error }).await;
                             return Err(RunError::RecoveryExhausted(
                                 recovery_tracker.attempts_for(&model_error),
                             ));
                         }
                     }
                 }
+                // Non-model errors (e.g. dropped stream consumer) end the run as-is.
                 Err(other) => return Err(other),
             };
 
         // Phase 4: Execute tools via StreamingToolExecutor
         let tool_results = if !tool_uses.is_empty() {
-            execute_tools(agent, &tool_uses, &config, &state).await
+            for tu in &tool_uses {
+                emit(
+                    tx,
+                    RunEvent::ToolStart {
+                        id: tu.id.clone(),
+                        name: tu.name.clone(),
+                    },
+                )
+                .await;
+            }
+            let results = execute_tools(agent, &tool_uses, &config, &state).await;
+            for tr in &results {
+                let (output, is_error) = match &tr.result {
+                    Ok(o) => (tool_output_to_string(o), false),
+                    Err(e) => (format!("{}", e), true),
+                };
+                emit(
+                    tx,
+                    RunEvent::ToolEnd {
+                        id: tr.tool_use_id.clone(),
+                        name: tr.tool_name.clone(),
+                        output,
+                        is_error,
+                    },
+                )
+                .await;
+            }
+            results
         } else {
             Vec::new()
         };
@@ -196,6 +309,13 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
         if let Some(budget) = config.budget_usd {
             if state.total_cost_usd > budget {
                 tracing::error!(budget = budget, cost = state.total_cost_usd, "budget_exceeded");
+                emit(
+                    tx,
+                    RunEvent::Aborted {
+                        reason: "budget_exceeded".to_string(),
+                    },
+                )
+                .await;
                 return Err(RunError::Aborted("budget_exceeded".to_string()));
             }
         }
@@ -205,37 +325,21 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             &stop_reason,
             &assistant_content,
             &tool_uses,
-            &tool_results,
             &state,
             max_turns,
             agent,
             &config,
             recovery_tracker.attempts_for_key("MaxOutputTokens"),
         );
+        emit(tx, RunEvent::StepResolved(next_step.clone())).await;
 
         // Phase 6: Apply state transition
         match next_step {
-            NextStep::Continue { .. } => {
+            NextStep::Continue => {
                 // Reset recovery tracker on successful continuation
                 recovery_tracker.reset();
                 todo_continuation_count = 0;
-                // Append assistant message
-                state.messages.push(Message::Assistant {
-                    content: assistant_content.clone(),
-                    usage: Some(usage.clone()),
-                });
-                // Append tool result messages
-                for tr in &tool_results {
-                    let (content, is_error) = match &tr.result {
-                        Ok(output) => (tool_output_to_string(output), false),
-                        Err(e) => (format!("{}", e), true),
-                    };
-                    state.messages.push(Message::ToolResult {
-                        tool_use_id: tr.tool_use_id.clone(),
-                        content,
-                        is_error,
-                    });
-                }
+                push_turn_messages(&mut state, assistant_content, usage, &tool_results);
                 state.current_turn += 1;
                 // Loop back
             }
@@ -250,6 +354,14 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                     )
                     .await
                 {
+                    emit(
+                        tx,
+                        RunEvent::GuardrailTripped {
+                            name: guardrail_name.clone(),
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
                     return Err(RunError::Guardrail(format!(
                         "{}: {}",
                         guardrail_name, reason
@@ -259,55 +371,35 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                 // Todo-aware continuation: if there are incomplete todos, inject a
                 // continuation prompt instead of terminating (max 3 consecutive continuations).
                 if todo_continuation_count < 3 {
-                    if let Some(ref store) = config.task_store {
-                        if let Ok(todos) = store.list_todos().await {
-                            let incomplete: Vec<_> = todos
-                                .iter()
-                                .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
-                                .collect();
-                            if !incomplete.is_empty() {
-                                // Append the assistant's message first
-                                state.messages.push(Message::Assistant {
-                                    content: assistant_content.clone(),
-                                    usage: Some(usage.clone()),
-                                });
-                                // Inject a user continuation prompt
-                                let todo_summary: Vec<String> = incomplete
-                                    .iter()
-                                    .map(|t| {
-                                        format!(
-                                            "- [{}] {}",
-                                            match t.status {
-                                                crate::task_store::TodoStatus::Pending => " ",
-                                                crate::task_store::TodoStatus::InProgress => "~",
-                                                crate::task_store::TodoStatus::Completed => "x",
-                                            },
-                                            t.content
-                                        )
-                                    })
-                                    .collect();
-                                let continuation = format!(
-                                    "You have {} incomplete todo item(s). Continue working through them:\n{}",
-                                    incomplete.len(),
-                                    todo_summary.join("\n")
-                                );
-                                state.messages.push(Message::User {
-                                    content: vec![ContentBlock::Text { text: continuation }],
-                                });
-                                state.current_turn += 1;
-                                todo_continuation_count += 1;
-                                continue;
-                            }
-                        }
+                    if let Some(continuation) = todo_continuation_prompt(&config).await {
+                        state.messages.push(Message::Assistant {
+                            content: assistant_content,
+                            usage: Some(usage),
+                        });
+                        state.messages.push(Message::User {
+                            content: vec![ContentBlock::Text { text: continuation }],
+                        });
+                        state.current_turn += 1;
+                        todo_continuation_count += 1;
+                        continue;
                     }
                 }
 
                 // Append the final assistant message to state
                 state.messages.push(Message::Assistant {
-                    content: assistant_content.clone(),
-                    usage: Some(usage.clone()),
+                    content: assistant_content,
+                    usage: Some(usage),
                 });
                 state.current_turn += 1;
+                emit(
+                    tx,
+                    RunEvent::AgentEnd {
+                        agent: agent.name.clone(),
+                        output: text.clone(),
+                        usage: state.total_usage.clone(),
+                    },
+                )
+                .await;
                 return Ok(RunResult {
                     output: text,
                     structured,
@@ -319,15 +411,17 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             }
 
             NextStep::MaxTurns { count } => {
-                return Ok(build_result_max_turns(&state, count));
+                emit(tx, RunEvent::MaxTurns { count }).await;
+                return Ok(build_result_max_turns(&state));
             }
 
             NextStep::Aborted { reason } => {
+                emit(tx, RunEvent::Aborted { reason: reason.clone() }).await;
                 return Err(RunError::Aborted(reason));
             }
 
             NextStep::Interruption { pending } => {
-                if let Some(ref handler) = config.approval_handler {
+                if let Some(handler) = config.approval_handler.clone() {
                     // Inline approval: delegate to handler and process responses
                     let context = ApprovalContext {
                         agent_name: config.agent_name.clone(),
@@ -335,64 +429,37 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                     };
                     let responses = handler.request_approval(&context).await;
 
-                    // Build a set of tool_use_ids that needed approval, mapped to their response
+                    // Pair each pending approval with its response.
                     // The request_id format is "approval-{tool_use_id}"
                     let approval_decisions: Vec<(&PendingApproval, &ApprovalResponse)> =
                         pending.iter().zip(responses.iter()).collect();
 
-                    // Process each tool result: keep allowed ones, replace denied ones
+                    // Process each tool result: keep allowed ones, drop denied ones
                     let mut final_tool_results = Vec::new();
-                    for tr in &tool_results {
-                        // Check if this tool result corresponds to a pending approval
+                    for tr in tool_results {
                         let pending_match = approval_decisions.iter().find(|(pa, _)| {
                             pa.request_id == format!("approval-{}", tr.tool_use_id)
                         });
 
-                        if let Some((_pa, response)) = pending_match {
-                            match response {
-                                ApprovalResponse::Allow => {
-                                    // Tool was already executed, keep its result
-                                    final_tool_results.push(tr);
-                                }
-                                ApprovalResponse::Deny => {
-                                    // Tool denied — we'll inject a denial result below
-                                    // Don't include the original result
-                                }
-                                ApprovalResponse::AlwaysAllow { pattern } => {
-                                    // Grant session-wide permission then keep result
-                                    config.permissions.grant_session_allow(pattern);
-                                    final_tool_results.push(tr);
-                                }
+                        match pending_match {
+                            Some((_pa, ApprovalResponse::Deny)) => {
+                                // Tool denied — we'll inject a denial result below
                             }
-                        } else {
-                            // Not a pending approval tool, keep as-is
-                            final_tool_results.push(tr);
+                            Some((_pa, ApprovalResponse::AlwaysAllow { pattern })) => {
+                                // Grant session-wide permission then keep result
+                                config.permissions.grant_session_allow(pattern);
+                                final_tool_results.push(tr);
+                            }
+                            // Allowed, or not a pending-approval tool: keep as-is
+                            _ => final_tool_results.push(tr),
                         }
                     }
 
-                    // Append assistant message
-                    state.messages.push(Message::Assistant {
-                        content: assistant_content.clone(),
-                        usage: Some(usage.clone()),
-                    });
-
-                    // Append tool results (approved and non-pending)
-                    for tr in &final_tool_results {
-                        let (content, is_error) = match &tr.result {
-                            Ok(output) => (tool_output_to_string(output), false),
-                            Err(e) => (format!("{}", e), true),
-                        };
-                        state.messages.push(Message::ToolResult {
-                            tool_use_id: tr.tool_use_id.clone(),
-                            content,
-                            is_error,
-                        });
-                    }
+                    push_turn_messages(&mut state, assistant_content, usage, &final_tool_results);
 
                     // Inject denial results for denied tools
                     for (pa, response) in &approval_decisions {
                         if matches!(response, ApprovalResponse::Deny) {
-                            // Find the tool_use_id from the request_id
                             let tool_use_id = pa.request_id
                                 .strip_prefix("approval-")
                                 .unwrap_or(&pa.request_id)
@@ -411,8 +478,9 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                     state.current_turn += 1;
                     // Continue the loop — the model will see the results on next turn
                 } else {
-                    // No handler: preserve existing behavior (return pending state)
+                    // No handler: return with the pending approvals recorded in state
                     state.pending_approvals = pending.clone();
+                    emit(tx, RunEvent::Interruption { pending }).await;
                     let output = extract_text_from_content(&assistant_content);
                     return Ok(RunResult {
                         output,
@@ -426,7 +494,6 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
             }
 
             NextStep::Recovery { strategy } => {
-                // Apply recovery strategy
                 match apply_recovery_run(
                     &strategy,
                     &mut state,
@@ -445,544 +512,72 @@ pub async fn run(agent: &Agent, input: Input, config: &RunConfig) -> Result<RunR
                         // Don't increment turn count for recovery retries
                         continue;
                     }
-                    RecoveryOutcome::GiveUp(_error) => {
+                    RecoveryOutcome::GiveUp(error) => {
+                        emit(tx, RunEvent::Error { error }).await;
                         return Err(RunError::RecoveryExhausted(
                             crate::recovery::MAX_RECOVERY_ATTEMPTS,
                         ));
                     }
                 }
             }
-
-            NextStep::BudgetContinue { .. } => {
-                state.messages.push(Message::Assistant {
-                    content: assistant_content.clone(),
-                    usage: Some(usage.clone()),
-                });
-                for tr in &tool_results {
-                    let (content, is_error) = match &tr.result {
-                        Ok(output) => (tool_output_to_string(output), false),
-                        Err(e) => (format!("{}", e), true),
-                    };
-                    state.messages.push(Message::ToolResult {
-                        tool_use_id: tr.tool_use_id.clone(),
-                        content,
-                        is_error,
-                    });
-                }
-                state.current_turn += 1;
-            }
         }
     }
 }
 
-/// Run an agent and return a stream of `RunEvent`s.
-///
-/// This is the streaming entry point. It wraps the main loop logic and yields
-/// events at each phase: TurnStart, StreamChunk, ToolStart, ToolEnd,
-/// StepResolved, and terminal events (AgentEnd, MaxTurns, Aborted, Error).
-///
-/// # Arguments
-/// * `agent` — The agent configuration.
-/// * `input` — How to initialize the run.
-/// * `config` — Run configuration.
-///
-/// # Returns
-/// A `RunStream` that yields `RunEvent`s until a terminal event is emitted.
-pub fn run_stream(agent: &Agent, input: Input, config: &RunConfig) -> RunStream {
-    let agent = agent.clone();
-    let config = config.clone();
-
-    Box::pin(stream::unfold(
-        StreamState::new(agent, input, config),
-        |mut ss| async move {
-            let event = ss.next_event().await;
-            match event {
-                Some(evt) => {
-                    let is_terminal = is_terminal_event(&evt);
-                    if is_terminal {
-                        Some((evt, ss))
-                    } else {
-                        Some((evt, ss))
-                    }
-                }
-                None => None,
-            }
-        },
-    ))
-}
-
-/// Internal state for the streaming unfold.
-struct StreamState {
-    agent: Agent,
-    config: RunConfig,
-    state: RunState,
-    max_turns: u32,
-    #[allow(dead_code)] // Deprecated: kept for transition to CompactionPipeline
-    compactor: ContextCompactor,
-    /// New 4-layer compaction pipeline (replaces compactor).
-    pipeline: CompactionPipeline,
-    phase: StreamPhase,
-    finished: bool,
-    recovery_tracker: RecoveryTracker,
-    effective_max_output_tokens: Option<u32>,
-    /// Counter for consecutive todo-aware continuations (prevents infinite loops).
-    todo_continuation_count: u32,
-    _run_span: tracing::Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum StreamPhase {
-    /// About to start a new turn.
-    TurnStart,
-}
-
-impl StreamState {
-    fn new(agent: Agent, input: Input, config: RunConfig) -> Self {
-        let state = initialize_state(&agent, &input);
-        let max_turns = agent.max_turns.unwrap_or(config.max_turns);
-        let compactor = ContextCompactor::new(CompactionConfig::default());
-        let pipeline = CompactionPipeline::new(CompactionLayerConfig::default());
-        let effective_max_output_tokens = config.max_output_tokens;
-        let run_span = tracing::info_span!(
-            "agent.run",
-            run_id = %state.run_id,
-            agent_name = %agent.name,
-        );
-        Self {
-            agent,
-            config,
-            state,
-            max_turns,
-            compactor,
-            pipeline,
-            phase: StreamPhase::TurnStart,
-            finished: false,
-            recovery_tracker: RecoveryTracker::new(),
-            effective_max_output_tokens,
-            todo_continuation_count: 0,
-            _run_span: run_span,
-        }
-    }
-
-    async fn next_event(&mut self) -> Option<RunEvent> {
-        if self.finished {
-            return None;
-        }
-
-        match self.phase {
-            StreamPhase::TurnStart => {
-                // Check turn limit
-                if self.state.current_turn >= self.max_turns {
-                    self.finished = true;
-                    return Some(RunEvent::MaxTurns {
-                        count: self.max_turns,
-                    });
-                }
-
-                // Emit TurnStart
-                let turn = self.state.current_turn + 1;
-
-                // Run the full turn inline and emit the terminal or continue
-                let result = self.execute_turn().await;
-                match result {
-                    TurnOutcome::Continue => {
-                        // Stay in TurnStart for next turn
-                        Some(RunEvent::TurnStart {
-                            turn,
-                            agent: self.agent.name.clone(),
-                        })
-                    }
-                    TurnOutcome::Terminal(event) => {
-                        self.finished = true;
-                        Some(event)
-                    }
-                    TurnOutcome::Error(err) => {
-                        self.finished = true;
-                        Some(RunEvent::Error {
-                            error: format!("{}", err),
-                        })
-                    }
-                }
-            }
-        }
-    }
-
-    async fn execute_turn(&mut self) -> TurnOutcome {
-        // Phase 0.5: Input guardrails (first turn only)
-        if self.state.current_turn == 0 {
-            if let Some((guardrail_name, reason)) =
-                check_input_guardrails(&self.agent.input_guardrails, &self.state.messages).await
-            {
-                return TurnOutcome::Terminal(RunEvent::GuardrailTripped {
-                    name: guardrail_name,
-                    reason,
-                });
-            }
-        }
-
-        // Resolve model early so it's available for compaction and request phases
-        let model = match self.config.provider.resolve(&self.config.model).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = %e, "model_resolution_error");
-                // Model resolution failure is unrecoverable — can't proceed without a model
-                return TurnOutcome::Error(RunError::Model(e));
-            }
+/// Append the turn's assistant message and tool result messages to state.
+fn push_turn_messages(
+    state: &mut RunState,
+    assistant_content: Vec<ContentBlock>,
+    usage: Usage,
+    tool_results: &[crate::executor::ToolResult],
+) {
+    state.messages.push(Message::Assistant {
+        content: assistant_content,
+        usage: Some(usage),
+    });
+    for tr in tool_results {
+        let (content, is_error) = match &tr.result {
+            Ok(output) => (tool_output_to_string(output), false),
+            Err(e) => (format!("{}", e), true),
         };
+        state.messages.push(Message::ToolResult {
+            tool_use_id: tr.tool_use_id.clone(),
+            content,
+            is_error,
+        });
+    }
+}
 
-        // Phase 1: Compaction (4-layer pipeline)
-        let token_count = compute_token_count(
-            &self.state.messages,
-            self.state.messages.iter().rev().find_map(|m| match m {
-                Message::Assistant { usage, .. } => usage.as_ref(),
-                _ => None,
-            }),
-        );
-        let _compaction_event = self
-            .pipeline
-            .compact(
-                &mut self.state.messages,
-                &mut self.state.compaction_state,
-                token_count,
-                model.context_window(),
-                model.max_output_tokens(),
-                self.state.current_turn,
-                Some(model.as_ref()),
+/// Build the todo-aware continuation prompt if the task store has incomplete todos.
+async fn todo_continuation_prompt(config: &RunConfig) -> Option<String> {
+    let store = config.task_store.as_ref()?;
+    let todos = store.list_todos().await.ok()?;
+    let incomplete: Vec<_> = todos
+        .iter()
+        .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
+        .collect();
+    if incomplete.is_empty() {
+        return None;
+    }
+    let todo_summary: Vec<String> = incomplete
+        .iter()
+        .map(|t| {
+            format!(
+                "- [{}] {}",
+                match t.status {
+                    crate::task_store::TodoStatus::Pending => " ",
+                    crate::task_store::TodoStatus::InProgress => "~",
+                    crate::task_store::TodoStatus::Completed => "x",
+                },
+                t.content
             )
-            .await;
-
-        // Phase 2: Prepare request
-        let system = resolve_instructions(&self.agent, &self.state).await;
-        let tool_defs = build_tool_definitions(&self.agent);
-        let request = ModelRequest {
-            system,
-            messages: self.state.messages.clone(),
-            tools: tool_defs,
-            max_tokens: self.effective_max_output_tokens,
-            temperature: self.config.temperature,
-            output_schema: self.agent.output_schema.clone(),
-        };
-
-        // Phase 3: Stream model
-        let model_call_span = tracing::info_span!("model.call", model = %model.name());
-        let model_stream = match model.stream(request).instrument(model_call_span).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "model_error");
-                let strategy = self.recovery_tracker.resolve_strategy(&e);
-                match apply_recovery_run(
-                    &strategy,
-                    &mut self.state,
-                    &mut self.effective_max_output_tokens,
-                    model.as_ref(),
-                ) {
-                    RecoveryOutcome::Retry => return TurnOutcome::Continue,
-                    RecoveryOutcome::GiveUp(error) => {
-                        return TurnOutcome::Terminal(RunEvent::Error { error });
-                    }
-                }
-            }
-        };
-
-        let (assistant_content, stop_reason, usage, tool_uses) =
-            match consume_stream(model_stream).await {
-                Ok(r) => r,
-                Err(RunError::Model(model_error)) => {
-                    tracing::error!(error = %model_error, "model_stream_error");
-                    let strategy = self.recovery_tracker.resolve_strategy(&model_error);
-                    match apply_recovery_run(
-                        &strategy,
-                        &mut self.state,
-                        &mut self.effective_max_output_tokens,
-                        model.as_ref(),
-                    ) {
-                        RecoveryOutcome::Retry => return TurnOutcome::Continue,
-                        RecoveryOutcome::GiveUp(error) => {
-                            return TurnOutcome::Terminal(RunEvent::Error { error });
-                        }
-                    }
-                }
-                Err(e) => return TurnOutcome::Error(e),
-            };
-
-        // Phase 4: Execute tools
-        let tool_results = if !tool_uses.is_empty() {
-            execute_tools(&self.agent, &tool_uses, &self.config, &self.state).await
-        } else {
-            Vec::new()
-        };
-
-        // Accumulate usage
-        accumulate_usage(&mut self.state, &usage, model.as_ref());
-
-        // Budget enforcement: check if cost exceeds configured budget
-        if let Some(budget) = self.config.budget_usd {
-            if self.state.total_cost_usd > budget {
-                return TurnOutcome::Terminal(RunEvent::Aborted {
-                    reason: "budget_exceeded".to_string(),
-                });
-            }
-        }
-
-        // Phase 5: Resolve next step
-        let next_step = resolve_next_step(
-            &stop_reason,
-            &assistant_content,
-            &tool_uses,
-            &tool_results,
-            &self.state,
-            self.max_turns,
-            &self.agent,
-            &self.config,
-            self.recovery_tracker.attempts_for_key("MaxOutputTokens"),
-        );
-
-        // Phase 6: Apply transition
-        match next_step {
-            NextStep::Continue { .. } => {
-                self.recovery_tracker.reset();
-                self.todo_continuation_count = 0;
-                self.state.messages.push(Message::Assistant {
-                    content: assistant_content,
-                    usage: Some(usage),
-                });
-                for tr in &tool_results {
-                    let (content, is_error) = match &tr.result {
-                        Ok(output) => (tool_output_to_string(output), false),
-                        Err(e) => (format!("{}", e), true),
-                    };
-                    self.state.messages.push(Message::ToolResult {
-                        tool_use_id: tr.tool_use_id.clone(),
-                        content,
-                        is_error,
-                    });
-                }
-                self.state.current_turn += 1;
-                TurnOutcome::Continue
-            }
-
-            NextStep::FinalOutput { ref text, ref structured } => {
-                // Check output guardrails before delivering the final output
-                if let Some((guardrail_name, reason)) =
-                    check_output_guardrails(
-                        &self.agent.output_guardrails,
-                        text,
-                        structured.as_ref(),
-                    )
-                    .await
-                {
-                    return TurnOutcome::Terminal(RunEvent::GuardrailTripped {
-                        name: guardrail_name,
-                        reason,
-                    });
-                }
-
-                // Todo-aware continuation: if there are incomplete todos, inject a
-                // continuation prompt instead of terminating (max 3 consecutive continuations).
-                if self.todo_continuation_count < 3 {
-                    if let Some(ref store) = self.config.task_store {
-                        if let Ok(todos) = store.list_todos().await {
-                            let incomplete: Vec<_> = todos
-                                .iter()
-                                .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
-                                .collect();
-                            if !incomplete.is_empty() {
-                                // Append the assistant's message first
-                                self.state.messages.push(Message::Assistant {
-                                    content: assistant_content,
-                                    usage: Some(usage),
-                                });
-                                // Inject a user continuation prompt
-                                let todo_summary: Vec<String> = incomplete
-                                    .iter()
-                                    .map(|t| {
-                                        format!(
-                                            "- [{}] {}",
-                                            match t.status {
-                                                crate::task_store::TodoStatus::Pending => " ",
-                                                crate::task_store::TodoStatus::InProgress => "~",
-                                                crate::task_store::TodoStatus::Completed => "x",
-                                            },
-                                            t.content
-                                        )
-                                    })
-                                    .collect();
-                                let continuation = format!(
-                                    "You have {} incomplete todo item(s). Continue working through them:\n{}",
-                                    incomplete.len(),
-                                    todo_summary.join("\n")
-                                );
-                                self.state.messages.push(Message::User {
-                                    content: vec![ContentBlock::Text { text: continuation }],
-                                });
-                                self.state.current_turn += 1;
-                                self.todo_continuation_count += 1;
-                                return TurnOutcome::Continue;
-                            }
-                        }
-                    }
-                }
-
-                self.state.messages.push(Message::Assistant {
-                    content: assistant_content,
-                    usage: Some(usage.clone()),
-                });
-                self.state.current_turn += 1;
-                TurnOutcome::Terminal(RunEvent::AgentEnd {
-                    agent: self.agent.name.clone(),
-                    output: text.clone(),
-                    usage: self.state.total_usage.clone(),
-                })
-            }
-
-            NextStep::MaxTurns { count } => {
-                TurnOutcome::Terminal(RunEvent::MaxTurns { count })
-            }
-
-            NextStep::Aborted { reason } => {
-                TurnOutcome::Terminal(RunEvent::Aborted { reason })
-            }
-
-            NextStep::Interruption { pending } => {
-                if let Some(ref handler) = self.config.approval_handler {
-                    // Inline approval: delegate to handler and process responses
-                    let context = ApprovalContext {
-                        agent_name: self.config.agent_name.clone(),
-                        pending: pending.clone(),
-                    };
-                    let responses = handler.request_approval(&context).await;
-
-                    // Build a set of tool_use_ids that needed approval, mapped to their response
-                    let approval_decisions: Vec<(&PendingApproval, &ApprovalResponse)> =
-                        pending.iter().zip(responses.iter()).collect();
-
-                    // Process each tool result: keep allowed ones, replace denied ones
-                    let mut final_tool_results = Vec::new();
-                    for tr in &tool_results {
-                        let pending_match = approval_decisions.iter().find(|(pa, _)| {
-                            pa.request_id == format!("approval-{}", tr.tool_use_id)
-                        });
-
-                        if let Some((_pa, response)) = pending_match {
-                            match response {
-                                ApprovalResponse::Allow => {
-                                    final_tool_results.push(tr);
-                                }
-                                ApprovalResponse::Deny => {
-                                    // Denied — skip original result, inject denial below
-                                }
-                                ApprovalResponse::AlwaysAllow { pattern } => {
-                                    self.config.permissions.grant_session_allow(pattern);
-                                    final_tool_results.push(tr);
-                                }
-                            }
-                        } else {
-                            final_tool_results.push(tr);
-                        }
-                    }
-
-                    // Append assistant message
-                    self.state.messages.push(Message::Assistant {
-                        content: assistant_content,
-                        usage: Some(usage),
-                    });
-
-                    // Append approved/non-pending tool results
-                    for tr in &final_tool_results {
-                        let (content, is_error) = match &tr.result {
-                            Ok(output) => (tool_output_to_string(output), false),
-                            Err(e) => (format!("{}", e), true),
-                        };
-                        self.state.messages.push(Message::ToolResult {
-                            tool_use_id: tr.tool_use_id.clone(),
-                            content,
-                            is_error,
-                        });
-                    }
-
-                    // Inject denial results for denied tools
-                    for (pa, response) in &approval_decisions {
-                        if matches!(response, ApprovalResponse::Deny) {
-                            let tool_use_id = pa.request_id
-                                .strip_prefix("approval-")
-                                .unwrap_or(&pa.request_id)
-                                .to_string();
-                            self.state.messages.push(Message::ToolResult {
-                                tool_use_id,
-                                content: format!(
-                                    "Permission denied: tool '{}' was not approved by the user.",
-                                    pa.tool_name
-                                ),
-                                is_error: true,
-                            });
-                        }
-                    }
-
-                    self.state.current_turn += 1;
-                    TurnOutcome::Continue
-                } else {
-                    // No handler: emit terminal Interruption event
-                    self.state.pending_approvals = pending.clone();
-                    TurnOutcome::Terminal(RunEvent::Interruption { pending })
-                }
-            }
-
-            NextStep::Recovery { strategy } => {
-                match apply_recovery_run(
-                    &strategy,
-                    &mut self.state,
-                    &mut self.effective_max_output_tokens,
-                    model.as_ref(),
-                ) {
-                    RecoveryOutcome::Retry => {
-                        // Track attempts for MaxTokens-related recoveries
-                        if matches!(
-                            strategy,
-                            RecoveryStrategy::ContinueMessage { .. }
-                                | RecoveryStrategy::EscalateOutputTokens { .. }
-                        ) {
-                            self.recovery_tracker.increment_key("MaxOutputTokens");
-                        }
-                        // Don't increment turn count for recovery retries
-                        TurnOutcome::Continue
-                    }
-                    RecoveryOutcome::GiveUp(error) => {
-                        TurnOutcome::Terminal(RunEvent::Error { error })
-                    }
-                }
-            }
-
-            NextStep::BudgetContinue { .. } => {
-                self.state.messages.push(Message::Assistant {
-                    content: assistant_content,
-                    usage: Some(usage),
-                });
-                for tr in &tool_results {
-                    let (content, is_error) = match &tr.result {
-                        Ok(output) => (tool_output_to_string(output), false),
-                        Err(e) => (format!("{}", e), true),
-                    };
-                    self.state.messages.push(Message::ToolResult {
-                        tool_use_id: tr.tool_use_id.clone(),
-                        content,
-                        is_error,
-                    });
-                }
-                self.state.current_turn += 1;
-                TurnOutcome::Continue
-            }
-        }
-    }
-}
-
-/// Outcome of a single turn execution in the streaming loop.
-enum TurnOutcome {
-    /// The turn completed and the loop should continue.
-    Continue,
-    /// A terminal event was produced; the stream should end.
-    Terminal(RunEvent),
-    /// An error occurred; emit Error event and terminate.
-    Error(RunError),
+        })
+        .collect();
+    Some(format!(
+        "You have {} incomplete todo item(s). Continue working through them:\n{}",
+        incomplete.len(),
+        todo_summary.join("\n")
+    ))
 }
 
 // --- Recovery helpers ---
@@ -997,7 +592,7 @@ enum RecoveryOutcome {
 
 /// Apply a recovery strategy to the run state.
 ///
-/// - CompactAndRetry: Force context compaction using a Snip stage, then retry.
+/// - CompactAndRetry: Force-snip the message history, then retry.
 /// - ContinueMessage: Append a continuation prompt to messages, retry.
 /// - EscalateOutputTokens: Increase effective_max_output_tokens, retry.
 /// - GiveUp: Return GiveUp with the error message.
@@ -1009,15 +604,10 @@ fn apply_recovery_run(
 ) -> RecoveryOutcome {
     match strategy {
         RecoveryStrategy::CompactAndRetry => {
-            // Force compaction: use a Snip stage targeting half the model's context window
-            let target_tokens = model.context_window() / 2;
-            let compactor = ContextCompactor::new(CompactionConfig {
-                stages: vec![CompactionStage::Snip {
-                    max_history_tokens: target_tokens,
-                }],
-                summary_model: None,
-            });
-            compactor.compact(&mut state.messages);
+            // ponytail: brute-force snip to half the context window; graceful
+            // compaction is the pipeline's job — this only fires when the
+            // provider still rejects the prompt as too long.
+            snip_history(&mut state.messages, model.context_window() / 2);
             RecoveryOutcome::Retry
         }
 
@@ -1045,29 +635,29 @@ fn apply_recovery_run(
             RecoveryOutcome::Retry
         }
 
-        RecoveryStrategy::FallbackModel { model: _model_name } => {
-            // Fallback model is handled at the LLM provider level (agent-llm)
-            // At the core level, we just retry with the same model
-            RecoveryOutcome::Retry
-        }
-
         RecoveryStrategy::GiveUp { error } => {
             RecoveryOutcome::GiveUp(error.clone())
         }
     }
 }
 
-/// Check if a RunEvent is terminal (should end the stream).
-fn is_terminal_event(event: &RunEvent) -> bool {
-    matches!(
-        event,
-        RunEvent::AgentEnd { .. }
-            | RunEvent::MaxTurns { .. }
-            | RunEvent::Aborted { .. }
-            | RunEvent::Error { .. }
-            | RunEvent::Interruption { .. }
-            | RunEvent::GuardrailTripped { .. }
-    )
+/// Remove oldest non-system messages (preserving the most recent user message)
+/// until the chars/4 token estimate fits within `max_tokens`.
+fn snip_history(messages: &mut Vec<Message>, max_tokens: usize) {
+    while estimate_tokens(messages) > max_tokens {
+        let last_user = messages
+            .iter()
+            .rposition(|m| matches!(m, Message::User { .. }));
+        let removable = messages.iter().enumerate().position(|(idx, m)| {
+            !matches!(m, Message::System { .. }) && Some(idx) != last_user
+        });
+        match removable {
+            Some(idx) => {
+                messages.remove(idx);
+            }
+            None => break,
+        }
+    }
 }
 
 // --- Helper functions ---
@@ -1140,8 +730,11 @@ fn build_tool_definitions(agent: &Agent) -> Vec<ToolDefinition> {
 }
 
 /// Consume a model stream, collecting content blocks, stop reason, usage, and tool uses.
+///
+/// When `tx` is attached, each chunk is forwarded as a `RunEvent::StreamChunk`.
 async fn consume_stream(
     model_stream: crate::model::ModelStream,
+    tx: Option<&mpsc::Sender<RunEvent>>,
 ) -> Result<(Vec<ContentBlock>, StopReason, Usage, Vec<ToolUseBlock>), RunError> {
     use futures::pin_mut;
 
@@ -1149,14 +742,17 @@ async fn consume_stream(
 
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_uses: Vec<ToolUseBlock> = Vec::new();
-    let mut current_tool_id: Option<String> = None;
     let mut current_tool_name: Option<String> = None;
-    let mut current_tool_input: String = String::new();
     let mut stop_reason = StopReason::EndTurn;
     let mut usage = Usage::default();
 
     while let Some(chunk_result) = model_stream.next().await {
         let chunk = chunk_result.map_err(RunError::Model)?;
+        if let Some(tx) = tx {
+            if tx.send(RunEvent::StreamChunk(chunk.clone())).await.is_err() {
+                return Err(RunError::Aborted("stream_dropped".to_string()));
+            }
+        }
         match chunk {
             StreamChunk::TextDelta { text } => {
                 text_parts.push(text);
@@ -1164,22 +760,16 @@ async fn consume_stream(
             StreamChunk::ThinkingDelta { .. } => {
                 // Thinking deltas are not included in final content
             }
-            StreamChunk::ToolUseStart { id, name } => {
-                current_tool_id = Some(id);
+            StreamChunk::ToolUseStart { name, .. } => {
                 current_tool_name = Some(name);
-                current_tool_input.clear();
             }
-            StreamChunk::ToolUseInputDelta { delta, .. } => {
-                current_tool_input.push_str(&delta);
+            StreamChunk::ToolUseInputDelta { .. } => {
+                // Input arrives fully parsed in ToolUseEnd
             }
-
             StreamChunk::ToolUseEnd { id, input } => {
-                let tool_name = current_tool_name.take().unwrap_or_default();
-                let _ = current_tool_id.take();
-                current_tool_input.clear();
                 tool_uses.push(ToolUseBlock {
                     id,
-                    name: tool_name,
+                    name: current_tool_name.take().unwrap_or_default(),
                     input,
                 });
             }
@@ -1228,9 +818,7 @@ async fn execute_tools(
         if let Some(tool) = agent.tools.iter().find(|t| t.name() == tu.name) {
             executor.enqueue(tu.clone(), Arc::clone(tool), ctx.clone());
         } else {
-            // Tool not found — we still need to enqueue something.
-            // Create a not-found result directly in completed.
-            // For simplicity, we'll handle this after execute_all.
+            // Tool not found — enqueue a placeholder that reports NotAvailable.
             executor.enqueue(tu.clone(), Arc::new(NotFoundTool(tu.name.clone())), ctx.clone());
         }
     }
@@ -1276,14 +864,14 @@ impl crate::tool::Tool for NotFoundTool {
 /// 1. **ContentFilter** → `Aborted` (content was blocked)
 /// 2. **MaxTurns check** → if current_turn + 1 >= max_turns → `MaxTurns`
 /// 3. **Permission-based interruption** → if any tool call requires approval → `Interruption`
-/// 4. **ToolUse** → `Continue(ToolUse)` (tools were called, continue loop)
+/// 4. **ToolUse** → `Continue` (tools were called, continue loop)
 /// 5. **MaxTokens** → `Recovery` (ContinueMessage or EscalateOutputTokens based on attempt)
 /// 6. **EndTurn / StopSequence** → `FinalOutput` (with optional structured output)
+#[allow(clippy::too_many_arguments)]
 fn resolve_next_step(
     stop_reason: &StopReason,
     assistant_content: &[ContentBlock],
     tool_uses: &[ToolUseBlock],
-    _tool_results: &[crate::executor::ToolResult],
     state: &RunState,
     max_turns: u32,
     agent: &Agent,
@@ -1319,11 +907,7 @@ fn resolve_next_step(
             let decision = config.permissions.check(&tu.name, &approval_req, Some(&tu.input));
 
             match decision {
-                PermissionDecision::NeedsApproval {
-                    description: _,
-                    call_id: _,
-                    context: _,
-                } => {
+                PermissionDecision::NeedsApproval { .. } => {
                     pending_approvals.push(PendingApproval {
                         tool_name: tu.name.clone(),
                         tool_input: tu.input.clone(),
@@ -1349,9 +933,7 @@ fn resolve_next_step(
         }
 
         // All tools allowed — continue
-        return NextStep::Continue {
-            reason: ContinueReason::ToolUse,
-        };
+        return NextStep::Continue;
     }
 
     // ToolUse stop reason but no actual tools (edge case)
@@ -1468,7 +1050,7 @@ async fn check_output_guardrails(
 }
 
 /// Build a RunResult for a MaxTurns termination.
-fn build_result_max_turns(state: &RunState, _max_turns: u32) -> RunResult {
+fn build_result_max_turns(state: &RunState) -> RunResult {
     let output = extract_text_from_last_assistant(&state.messages);
     RunResult {
         output,
@@ -1493,7 +1075,6 @@ fn extract_text_from_last_assistant(messages: &[Message]) -> String {
         })
         .unwrap_or_default()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1754,7 +1335,7 @@ mod tests {
 
         // Last event should be terminal
         let last = events.last().unwrap();
-        assert!(is_terminal_event(last));
+        assert!(matches!(last, RunEvent::AgentEnd { .. }));
     }
 
     #[test]
@@ -1848,25 +1429,6 @@ mod tests {
         assert_eq!(defs[0].description, "Echoes input text");
     }
 
-    #[test]
-    fn test_is_terminal_event() {
-        assert!(is_terminal_event(&RunEvent::AgentEnd {
-            agent: "a".into(),
-            output: "o".into(),
-            usage: Usage::default(),
-        }));
-        assert!(is_terminal_event(&RunEvent::MaxTurns { count: 5 }));
-        assert!(is_terminal_event(&RunEvent::Aborted {
-            reason: "r".into()
-        }));
-        assert!(is_terminal_event(&RunEvent::Error {
-            error: "e".into()
-        }));
-        assert!(!is_terminal_event(&RunEvent::TurnStart {
-            turn: 1,
-            agent: "a".into(),
-        }));
-    }
 
     // --- Budget enforcement tests ---
 
@@ -2579,7 +2141,6 @@ mod tests {
             &StopReason::ContentFilter,
             &content,
             &[],
-            &[],
             &state,
             25,
             &agent,
@@ -2617,7 +2178,6 @@ mod tests {
             &StopReason::ToolUse,
             &[],
             &tool_uses,
-            &[],
             &state,
             5,
             &agent,
@@ -2650,7 +2210,6 @@ mod tests {
             &StopReason::ToolUse,
             &[],
             &tool_uses,
-            &[],
             &state,
             25,
             &agent,
@@ -2660,9 +2219,7 @@ mod tests {
 
         assert_eq!(
             result,
-            NextStep::Continue {
-                reason: ContinueReason::ToolUse
-            }
+            NextStep::Continue
         );
     }
 
@@ -2715,7 +2272,6 @@ mod tests {
             &StopReason::ToolUse,
             &[],
             &tool_uses,
-            &[],
             &state,
             25,
             &agent,
@@ -2761,7 +2317,6 @@ mod tests {
             &StopReason::ToolUse,
             &[],
             &tool_uses,
-            &[],
             &state,
             25,
             &agent,
@@ -2794,7 +2349,6 @@ mod tests {
             &[ContentBlock::Text {
                 text: "partial...".to_string(),
             }],
-            &[],
             &[],
             &state,
             25,
@@ -2829,7 +2383,6 @@ mod tests {
                 text: "partial...".to_string(),
             }],
             &[],
-            &[],
             &state,
             25,
             &agent,
@@ -2862,7 +2415,6 @@ mod tests {
         let result = resolve_next_step(
             &StopReason::EndTurn,
             &content,
-            &[],
             &[],
             &state,
             25,
@@ -2899,7 +2451,6 @@ mod tests {
         let result = resolve_next_step(
             &StopReason::EndTurn,
             &content,
-            &[],
             &[],
             &state,
             25,
@@ -2938,7 +2489,6 @@ mod tests {
             &StopReason::EndTurn,
             &content,
             &[],
-            &[],
             &state,
             25,
             &agent,
@@ -2973,7 +2523,6 @@ mod tests {
             &StopReason::StopSequence,
             &content,
             &[],
-            &[],
             &state,
             25,
             &agent,
@@ -3005,7 +2554,6 @@ mod tests {
 
         let result = resolve_next_step(
             &StopReason::ContentFilter,
-            &[],
             &[],
             &[],
             &state,
