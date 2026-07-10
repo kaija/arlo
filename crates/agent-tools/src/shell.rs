@@ -89,6 +89,11 @@ impl Tool for ShellTool {
                 .arg("-c")
                 .arg(command)
                 .current_dir(&ctx.working_dir)
+                // `output()` only pipes stdout/stderr — stdin defaults to
+                // inherit, which hands the raw-mode TUI terminal's stdin to
+                // the child. Explicitly null it so spawned commands can never
+                // contend for or hijack the interactive terminal's input.
+                .stdin(std::process::Stdio::null())
                 .output(),
         )
         .await;

@@ -156,6 +156,16 @@ async fn drive(
             return Err(RunError::Aborted("stream_dropped".to_string()));
         }
 
+        // Phase 0.5: Deliver results from finished background tasks so the
+        // model sees them at the next turn boundary (Claude-Code notification
+        // model). Without this, sub-agent results only ever reach the UI —
+        // never the conversation the model actually reads.
+        if let Some(notification) = drain_task_notifications(&config).await {
+            state.messages.push(Message::User {
+                content: vec![ContentBlock::Text { text: notification }],
+            });
+        }
+
         // Phase 1: Context compaction (4-layer pipeline)
         let token_count = compute_token_count(
             &state.messages,
@@ -368,6 +378,22 @@ async fn drive(
                     )));
                 }
 
+                // Background-task-aware continuation: never finish while
+                // sub-agents are still running. Wait for the next one to reach
+                // a terminal state, inject its result, and let the model react.
+                // Bounded by the number of spawned tasks — each delivers once.
+                if let Some(notification) = await_background_tasks(&config, tx).await {
+                    state.messages.push(Message::Assistant {
+                        content: assistant_content.clone(),
+                        usage: Some(usage.clone()),
+                    });
+                    state.messages.push(Message::User {
+                        content: vec![ContentBlock::Text { text: notification }],
+                    });
+                    state.current_turn += 1;
+                    continue;
+                }
+
                 // Todo-aware continuation: if there are incomplete todos, inject a
                 // continuation prompt instead of terminating (max 3 consecutive continuations).
                 if todo_continuation_count < 3 {
@@ -578,6 +604,73 @@ async fn todo_continuation_prompt(config: &RunConfig) -> Option<String> {
         incomplete.len(),
         todo_summary.join("\n")
     ))
+}
+
+/// Drain unacknowledged terminal background tasks into a notification message.
+///
+/// Acknowledges each task so its result is delivered to the model exactly once.
+/// Returns None when there is no task store or nothing new to report.
+async fn drain_task_notifications(config: &RunConfig) -> Option<String> {
+    let store = config.task_store.as_ref()?;
+    let tasks = store.list_unacknowledged_terminal().await.ok()?;
+    if tasks.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for task in &tasks {
+        let line = match task.status {
+            crate::task_store::TaskStatus::Completed => format!(
+                "[background task completed] {} (task_id={})\nResult: {}",
+                task.description,
+                task.id,
+                task.output.as_deref().unwrap_or("(no output)")
+            ),
+            _ => format!(
+                "[background task failed] {} (task_id={})\nError: {}",
+                task.description,
+                task.id,
+                task.last_error
+                    .as_deref()
+                    .or(task.output.as_deref())
+                    .unwrap_or("(no details)")
+            ),
+        };
+        lines.push(line);
+        let _ = store.acknowledge_task(&task.id).await;
+    }
+    Some(lines.join("\n\n"))
+}
+
+/// Block until at least one unfinished background task reaches a terminal
+/// state, then drain and return its notification. Returns None immediately
+/// when there is no task store, no unfinished tasks, or the stream consumer
+/// went away.
+async fn await_background_tasks(
+    config: &RunConfig,
+    tx: Option<&mpsc::Sender<RunEvent>>,
+) -> Option<String> {
+    let store = config.task_store.as_ref()?;
+    // ponytail: 200ms polling with a 10-min ceiling; switch to a store-side
+    // notify channel if sub-agents ever legitimately run longer.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        if let Some(text) = drain_task_notifications(config).await {
+            return Some(text);
+        }
+        let counts = store.count_by_status().await.ok()?;
+        if counts.pending == 0 && counts.running == 0 {
+            return None;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        if let Some(tx) = tx {
+            if tx.is_closed() {
+                return None;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 // --- Recovery helpers ---

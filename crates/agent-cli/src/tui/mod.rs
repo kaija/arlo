@@ -100,8 +100,10 @@ pub async fn run_tui_repl(
 
         let result = state.update(event);
 
-        // Poll notifications on Tick when mode is Running or Idle (Requirement 3.3, 5.5)
-        if is_tick && matches!(state.mode, AppMode::Running | AppMode::Idle) {
+        // Poll notifications on Tick only when Idle. While a run is in flight
+        // the run loop itself drains and acknowledges terminal tasks so the
+        // model sees the results — polling here too would steal them.
+        if is_tick && matches!(state.mode, AppMode::Idle) {
             notifications::poll_notifications(&mut state).await;
         }
 

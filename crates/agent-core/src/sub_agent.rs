@@ -153,10 +153,9 @@ impl SubAgentTool {
     }
 
     /// Spawn the sub-agent as a background task and return immediately.
-    fn run_background(&self, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn run_background(&self, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let prompt = Self::extract_prompt(&input);
         let sub_config = self.sub_agent_config();
-        let sub_input = Input::Fresh { prompt };
         let agent = Arc::clone(&self.def.agent);
         let agent_name = self.def.agent.name.clone();
 
@@ -166,29 +165,41 @@ impl SubAgentTool {
         );
 
         if let Some(store) = &self.task_store {
-            // Task-tracked background mode: register, transition, and track via the store.
+            // Task-tracked background mode: register BEFORE spawning so the
+            // parent model receives the task_id and can correlate the later
+            // completion notification with this delegation.
             let store = Arc::clone(store);
-            let desc = format!("Sub-agent '{}' background task", agent_name);
+            let snippet: String = prompt.chars().take(80).collect();
+            let params = CreateTaskParams {
+                description: format!("Sub-agent '{}': {}", agent_name, snippet),
+                task_type: TaskType::SubAgent,
+                dependencies: vec![],
+                max_retries: 0,
+            };
+            let task_id = match store.create_task(params).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to register background task in store");
+                    // Fall back to untracked fire-and-forget behavior.
+                    let sub_input = Input::Fresh { prompt };
+                    tokio::spawn(
+                        async move {
+                            let _result = run(&agent, sub_input, &sub_config).await;
+                        }
+                        .instrument(sub_agent_span),
+                    );
+                    return Ok(ToolOutput::Text(format!(
+                        "Background task started (untracked): agent='{}'",
+                        self.def.agent.name
+                    )));
+                }
+            };
 
+            let sub_input = Input::Fresh { prompt };
+            let spawned_task_id = task_id.clone();
             tokio::spawn(
                 async move {
-                    let params = CreateTaskParams {
-                        description: desc,
-                        task_type: TaskType::SubAgent,
-                        dependencies: vec![],
-                        max_retries: 0,
-                    };
-
-                    // Best-effort registration: if store operations fail, log and continue.
-                    let task_id = match store.create_task(params).await {
-                        Ok(id) => id,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to register background task in store");
-                            // Fall back to just running without tracking
-                            let _result = run(&agent, sub_input, &sub_config).await;
-                            return;
-                        }
-                    };
+                    let task_id = spawned_task_id;
 
                     // Transition to Running
                     if let Err(e) = store
@@ -254,12 +265,15 @@ impl SubAgentTool {
             );
 
             Ok(ToolOutput::Text(format!(
-                "Background task registered and started: agent='{}'",
-                self.def.agent.name
+                "Background task started: task_id={}, agent='{}'. Its result will be \
+                 delivered to you in a later message as a [background task completed] \
+                 notification — do not conclude before receiving it.",
+                task_id, self.def.agent.name
             )))
         } else {
             // Existing fire-and-forget behavior when no task store is present.
             let task_id = BACKGROUND_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let sub_input = Input::Fresh { prompt };
 
             tokio::spawn(
                 async move {
@@ -322,7 +336,7 @@ impl Tool for SubAgentTool {
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         if self.def.background {
-            self.run_background(input)
+            self.run_background(input).await
         } else {
             self.run_foreground(input).await
         }

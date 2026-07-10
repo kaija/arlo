@@ -181,6 +181,7 @@ impl StreamingToolExecutor {
             let tool_use_id = enqueued.tool_use.id.clone();
             let tool_name = enqueued.tool_use.name.clone();
             let error_cascades = tool.error_cascades();
+            let tool_timeout = tool.timeout();
 
             let handle = tokio::spawn(async move {
                 // Acquire semaphore permit for concurrency limiting
@@ -205,7 +206,12 @@ impl StreamingToolExecutor {
                                 "Cancelled due to sibling error".to_string(),
                             ))
                         }
-                        res = tool.execute(input, &ctx) => res
+                        res = tokio::time::timeout(tool_timeout, tool.execute(input, &ctx)) => {
+                            match res {
+                                Ok(inner) => inner,
+                                Err(_elapsed) => Err(ToolError::Timeout),
+                            }
+                        }
                     }
                 };
 
@@ -240,6 +246,7 @@ impl StreamingToolExecutor {
         let ctx = enqueued.ctx;
         let error_cascades = tool.error_cascades();
         let tool_name_str = enqueued.tool_use.name.clone();
+        let tool_timeout = tool.timeout();
 
         let result = {
             tokio::select! {
@@ -248,7 +255,12 @@ impl StreamingToolExecutor {
                         "Cancelled due to sibling error".to_string(),
                     ))
                 }
-                res = tool.execute(input, &ctx) => res
+                res = tokio::time::timeout(tool_timeout, tool.execute(input, &ctx)) => {
+                    match res {
+                        Ok(inner) => inner,
+                        Err(_elapsed) => Err(ToolError::Timeout),
+                    }
+                }
             }
         };
 
