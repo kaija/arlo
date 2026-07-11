@@ -23,6 +23,8 @@ pub mod profile;
 pub mod settings;
 pub mod task_store;
 pub mod in_memory_task_store;
+pub mod session_store;
+pub mod fs_session_store;
 pub mod todolist_tool;
 pub mod tool;
 
@@ -68,5 +70,8 @@ pub use task_store::{
 };
 
 pub use in_memory_task_store::InMemoryTaskStore;
+
+pub use session_store::{SessionMeta, SessionStore, SessionStoreError};
+pub use fs_session_store::FsSessionStore;
 
 pub use todolist_tool::TodoListTool;

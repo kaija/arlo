@@ -19,9 +19,9 @@ use async_trait::async_trait;
 
 use agent_core::{
     run, Agent, ConfigError, ConfigInputs, ConfigResolver, DenyAllApprovalHandler,
-    InMemoryTaskStore, Input, Instructions, Model, ModelError, ModelProvider, PermissionEngine,
-    PermissionMode, RunConfig, SkillRegistry, SkillTool, SubAgentDef, SubAgentTool, TaskStore,
-    TodoListTool, Tool,
+    FsSessionStore, InMemoryTaskStore, Input, Instructions, Message, Model, ModelError,
+    ModelProvider, PermissionEngine, PermissionMode, RunConfig, SessionStore, SkillRegistry,
+    SkillTool, SubAgentDef, SubAgentTool, TaskStore, TodoListTool, Tool,
 };
 use agent_llm::{ModelOverrideWrapper, UnifiedProvider};
 use agent_tools::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
@@ -62,6 +62,10 @@ struct CliArgs {
     dump_prompt: bool,
     /// When true, skip all permission checks (bypass mode).
     skip_permissions: bool,
+    /// Resume a stored session by id.
+    resume: Option<String>,
+    /// When true, list stored sessions and exit.
+    list_sessions: bool,
 }
 
 /// Parse CLI arguments from a given slice (testable version).
@@ -77,6 +81,8 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut dump_prompt = false;
     let mut skip_permissions = false;
+    let mut resume: Option<String> = None;
+    let mut list_sessions = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -100,6 +106,16 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
             }
             "--skip-permissions" | "--yolo" | "--no-permissions" => {
                 skip_permissions = true;
+            }
+            "--resume" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--resume requires a session id".to_string());
+                }
+                resume = Some(args[i].clone());
+            }
+            "--sessions" => {
+                list_sessions = true;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -127,6 +143,8 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
         prompt,
         dump_prompt,
         skip_permissions,
+        resume,
+        list_sessions,
     })
 }
 
@@ -153,6 +171,8 @@ fn print_usage() {
     eprintln!("  --skip-permissions");
     eprintln!("                    Skip all permission checks (auto-approve every tool call)");
     eprintln!("  --yolo            Alias for --skip-permissions");
+    eprintln!("  --resume <ID>     Resume a stored session (see --sessions)");
+    eprintln!("  --sessions        List stored sessions (~/.arlo/sessions) and exit");
     eprintln!("  --help, -h        Show this help message");
     eprintln!();
     eprintln!("If PROMPT is provided, run in single-prompt mode (print response and exit).");
@@ -348,6 +368,7 @@ async fn run_single_prompt(
     tools: Vec<Arc<dyn Tool>>,
     instructions: Instructions,
     _task_store: Option<Arc<dyn TaskStore>>,
+    session: &SessionContext,
 ) -> Result<String, String> {
     let mut builder = Agent::builder("arlo").instructions(instructions);
     for tool in tools {
@@ -367,14 +388,43 @@ async fn run_single_prompt(
 
     let config = config_builder.build();
 
-    let input = Input::Fresh {
-        prompt: prompt.to_string(),
-    };
+    let mut messages = session.initial_history.clone();
+    messages.push(Message::User {
+        content: vec![agent_core::ContentBlock::Text {
+            text: prompt.to_string(),
+        }],
+    });
+    let input = Input::Items { messages };
 
     match run(&agent, input, &config).await {
-        Ok(result) => Ok(result.output),
+        Ok(result) => {
+            if let Err(e) = session
+                .store
+                .save(&session.id, &result.state.messages)
+                .await
+            {
+                eprintln!("warning: failed to persist session {}: {}", session.id, e);
+            }
+            Ok(result.output)
+        }
         Err(e) => Err(format!("Error: {}", e)),
     }
+}
+
+/// Session persistence context threaded through both CLI modes.
+struct SessionContext {
+    store: Arc<dyn SessionStore>,
+    id: String,
+    initial_history: Vec<Message>,
+}
+
+/// Generate a fresh session id: local timestamp plus pid for uniqueness.
+fn new_session_id() -> String {
+    format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        process::id()
+    )
 }
 
 #[tokio::main]
@@ -388,6 +438,47 @@ async fn main() {
             print_usage();
             process::exit(1);
         }
+    };
+
+    // Session history store (~/.arlo/sessions)
+    let session_store: Arc<dyn SessionStore> = Arc::new(FsSessionStore::new());
+
+    // Handle --sessions: list stored sessions and exit (no provider needed)
+    if cli.list_sessions {
+        match session_store.list().await {
+            Ok(sessions) if sessions.is_empty() => println!("No stored sessions."),
+            Ok(sessions) => {
+                for meta in sessions {
+                    let updated: chrono::DateTime<chrono::Local> = meta.updated_at.into();
+                    println!("{}  {}", updated.format("%Y-%m-%d %H:%M:%S"), meta.id);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: failed to list sessions: {}", e);
+                process::exit(1);
+            }
+        }
+        process::exit(0);
+    }
+
+    // Resolve session id and prior history (--resume loads an existing session)
+    let session = match &cli.resume {
+        Some(id) => match session_store.load(id).await {
+            Ok(history) => SessionContext {
+                store: session_store.clone(),
+                id: id.clone(),
+                initial_history: history,
+            },
+            Err(e) => {
+                eprintln!("error: cannot resume session '{}': {}", id, e);
+                process::exit(1);
+            }
+        },
+        None => SessionContext {
+            store: session_store.clone(),
+            id: new_session_id(),
+            initial_history: Vec::new(),
+        },
     };
 
     // Resolve provider configuration via ConfigResolver (profile-based or env fallback)
@@ -608,6 +699,7 @@ Additional tool guidance:
                 tools,
                 instructions,
                 Some(task_store),
+                &session,
             )
             .await
             {
@@ -634,6 +726,9 @@ Additional tool guidance:
                 instructions,
                 permission_mode,
                 task_store,
+                session.store.clone(),
+                session.id.clone(),
+                session.initial_history,
             )
             .await
             {

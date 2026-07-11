@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use agent_core::{
     run_stream, Agent, ApprovalResponse, ContentBlock, Input, Instructions, Message, ModelProvider,
-    PermissionEngine, PermissionMode, RunConfig, TaskStore, Tool,
+    PermissionEngine, PermissionMode, RunConfig, SessionStore, TaskStore, Tool,
 };
 
 use self::app::{AppMode, AppState, OutputSpan, SpanStyle, UpdateResult};
@@ -29,6 +29,7 @@ use self::event_loop::{spawn_stream_forwarder, spawn_terminal_poller, StreamForw
 ///
 /// Sets up the ratatui terminal, initializes session state, and drives the
 /// event loop that multiplexes terminal input with agent RunStream events.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui_repl(
     provider: Arc<dyn ModelProvider>,
     model: &str,
@@ -36,6 +37,9 @@ pub async fn run_tui_repl(
     instructions: Instructions,
     permission_mode: PermissionMode,
     _task_store: Arc<dyn TaskStore>,
+    session_store: Arc<dyn SessionStore>,
+    session_id: String,
+    initial_history: Vec<Message>,
 ) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -61,6 +65,21 @@ pub async fn run_tui_repl(
     // Initialize application state with permission engine
     let permissions = PermissionEngine::new(permission_mode);
     let mut state = AppState::new(permissions.clone(), Some(_task_store.clone()));
+
+    // Seed conversation history when resuming a stored session
+    if !initial_history.is_empty() {
+        state.output_buffer.push(OutputSpan {
+            text: format!(
+                "Resumed session {} ({} messages)\n",
+                session_id,
+                initial_history.len()
+            ),
+            style: SpanStyle::System,
+        });
+        state.history = initial_history;
+    }
+    // Persist history whenever it grows (user prompts, assistant replies, denials)
+    let mut saved_history_len = state.history.len();
 
     // Keep a reference to task_store for RunConfig building
     let task_store = _task_store;
@@ -216,6 +235,18 @@ pub async fn run_tui_repl(
                 });
             }
             UpdateResult::Exit => break,
+        }
+
+        // Persist session history when it changed this iteration.
+        // save() is a full atomic rewrite — cheap at conversation sizes.
+        if state.history.len() != saved_history_len {
+            if let Err(e) = session_store.save(&session_id, &state.history).await {
+                state.output_buffer.push(OutputSpan {
+                    text: format!("warning: failed to persist session: {}\n", e),
+                    style: SpanStyle::Warning,
+                });
+            }
+            saved_history_len = state.history.len();
         }
     }
 
