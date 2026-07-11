@@ -2,4 +2,6 @@
 //! per-connection session driver, the web analogue of `crate::tui`.
 
 pub mod agui;
+pub mod server;
+pub mod session;
 pub mod ws_approval;
