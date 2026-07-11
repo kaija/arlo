@@ -1,162 +1,202 @@
-# Arlo-Rust Agent Framework 系統架構
+# Arlo-Rust Agent Framework Architecture
 
-本文件描述 arlo-rust 的核心執行架構：主迴圈（RunLoop）的自主決策、HITL 權限控制、Task／Todo 管理、Sub-Agent 的運作與協調，以及錯誤處理流程。最後以一個貫穿所有機制的完整範例收尾。
+> 繁體中文版：[agent-framework.zh-TW.md](agent-framework.zh-TW.md)
 
-程式碼位置以 `crates/agent-core/src/` 為基準，例如 `run_loop.rs` 指 `crates/agent-core/src/run_loop.rs`。
+This document describes the core execution architecture of arlo-rust: the main loop
+(RunLoop) and its autonomous decision-making, HITL permission control, Task/Todo
+management, sub-agent operation and coordination, and the error-handling flow. It closes
+with a complete example that exercises every mechanism.
 
----
-
-## 目錄
-
-1. [整體架構總覽](#1-整體架構總覽)
-2. [主迴圈（RunLoop）與自主決策](#2-主迴圈runloop與自主決策)
-3. [HITL 權限控制](#3-hitl-權限控制human-in-the-loop)
-4. [Task 管理與 Todo 工具](#4-task-管理與-todo-工具)
-5. [Sub-Agent 運作機制](#5-sub-agent-運作機制)
-6. [Main Agent 對多個 Sub-Agent 的協調](#6-main-agent-對多個-sub-agent-的協調)
-7. [錯誤處理與復原流程](#7-錯誤處理與復原流程)
-8. [貫穿範例：一次長任務的完整生命週期](#8-貫穿範例一次長任務的完整生命週期)
+Code locations are relative to `crates/agent-core/src/`; e.g. `run_loop.rs` means
+`crates/agent-core/src/run_loop.rs`.
 
 ---
 
-## 1. 整體架構總覽
+## Table of contents
 
-Workspace 分為五個 crate：
+1. [Architecture overview](#1-architecture-overview)
+2. [The main loop (RunLoop) and autonomous decisions](#2-the-main-loop-runloop-and-autonomous-decisions)
+3. [HITL permission control](#3-hitl-permission-control-human-in-the-loop)
+4. [Task management and the Todo tool](#4-task-management-and-the-todo-tool)
+5. [How sub-agents work](#5-how-sub-agents-work)
+6. [Coordinating multiple sub-agents from the main agent](#6-coordinating-multiple-sub-agents-from-the-main-agent)
+7. [Error handling and recovery](#7-error-handling-and-recovery)
+8. [End-to-end example: the full lifecycle of a long task](#8-end-to-end-example-the-full-lifecycle-of-a-long-task)
 
-| Crate | 職責 |
+---
+
+## 1. Architecture overview
+
+The workspace is split into five crates:
+
+| Crate | Responsibility |
 |---|---|
-| `agent-core` | RunLoop、NextStep 狀態機、權限引擎、TaskStore、Sub-Agent、壓縮、復原 |
-| `agent-llm` | Model / ModelProvider 實作（Anthropic、OpenAI 等） |
-| `agent-tools` | 內建工具（file_read / file_edit / bash …） |
-| `agent-mcp` | MCP client 與 transport |
-| `agent-cli` | TUI、approval UI、事件渲染 |
+| `agent-core` | RunLoop, NextStep state machine, permission engine, TaskStore, sub-agents, compaction, recovery |
+| `agent-llm` | Model / ModelProvider implementations (Anthropic, OpenAI, etc.) |
+| `agent-tools` | Built-in tools (file_read / file_edit / bash …) |
+| `agent-mcp` | MCP client and transport |
+| `agent-cli` | TUI, approval UI, event rendering |
 
-核心資料流：
+Core data flow:
 
 ```
 User prompt
     │
     ▼
-run() / run_stream()  ──────────► RunEvent stream（TUI 訂閱）
+run() / run_stream()  ──────────► RunEvent stream (subscribed by the TUI)
     │
     ▼
-┌─────────────────── drive()（主迴圈）───────────────────┐
-│ Phase 0   turn limit 檢查                               │
-│ Phase 0.5 背景任務結果注入（TaskStore 通知）             │
-│ Phase 1   Context 壓縮（3 層 CompactionPipeline）        │
-│ Phase 1.5 Input guardrails（僅第一輪）                  │
-│ Phase 2   組裝 ModelRequest（system + messages + tools）│
-│ Phase 3   串流模型回應（錯誤 → RecoveryTracker）         │
-│ Phase 4   StreamingToolExecutor 併發執行工具             │
-│ Phase 5   resolve_next_step() → NextStep                │
-│ Phase 6   套用狀態轉移（continue / 終止 / 中斷 / 復原）  │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────── drive() (main loop) ────────────────────┐
+│ Phase 0   turn limit check                                  │
+│ Phase 0.5 inject background task results (TaskStore)        │
+│ Phase 1   context compaction (3-layer CompactionPipeline)   │
+│ Phase 1.5 input guardrails (first turn only)                │
+│ Phase 2   build ModelRequest (system + messages + tools)    │
+│ Phase 3   stream model response (errors → RecoveryTracker)  │
+│ Phase 4   StreamingToolExecutor runs tools concurrently     │
+│ Phase 5   resolve_next_step() → NextStep                    │
+│ Phase 6   apply transition (continue / end / interrupt /    │
+│           recover)                                          │
+└──────────────────────────────────────────────────────────────┘
     │                         │
     ▼                         ▼
-PermissionEngine          TaskStore（TaskEntry + TodoItem）
-（HITL 決策）              （背景任務 + 計畫清單）
+PermissionEngine          TaskStore (TaskEntry + TodoItem)
+(HITL decisions)          (background tasks + plan list)
                               ▲
                               │
-                        SubAgentTool（fg/bg 生成子代理）
+                        SubAgentTool (spawns fg/bg sub-agents)
 ```
 
-`run()`（非串流）與 `run_stream()`（串流）共用同一個 `drive()` 實作（`run_loop.rs`）。串流模式下每個 phase 都會透過 mpsc channel 發出 `RunEvent`（`TurnStart`、`StreamChunk`、`ToolStart/ToolEnd`、`StepResolved`、以及唯一一個終止事件）。
+`run()` (non-streaming) and `run_stream()` (streaming) share the single `drive()`
+implementation (`run_loop.rs`). In streaming mode every phase emits `RunEvent`s over an
+mpsc channel (`TurnStart`, `StreamChunk`, `ToolStart`/`ToolEnd`, `StepResolved`, and
+exactly one terminal event).
 
 ---
 
-## 2. 主迴圈（RunLoop）與自主決策
+## 2. The main loop (RunLoop) and autonomous decisions
 
-### 2.1 NextStep 狀態機
+### 2.1 The NextStep state machine
 
-每一輪（turn）結束時，`resolve_next_step()`（`run_loop.rs`）根據模型的 stop reason、工具呼叫與權限決策，解析出一個 `NextStep`（`next_step.rs`）：
+At the end of every turn, `resolve_next_step()` (`run_loop.rs`) resolves a `NextStep`
+(`next_step.rs`) from the model's stop reason, its tool calls, and permission decisions:
 
 ```rust
 pub enum NextStep {
-    Continue,                                  // 有工具呼叫且全部允許 → 繼續下一輪
-    FinalOutput { text, structured },          // 模型結束回合 → 候選終止
-    Interruption { pending: Vec<PendingApproval> }, // 工具需要用戶核准
-    Recovery { strategy: RecoveryStrategy },   // 可復原的錯誤
-    MaxTurns { count },                        // 到達回合上限
-    Aborted { reason },                        // 中止（content filter、拒絕、超預算）
+    Continue,                                  // tool calls, all allowed → next turn
+    FinalOutput { text, structured },          // model ended its turn → candidate exit
+    Interruption { pending: Vec<PendingApproval> }, // tools need user approval
+    Recovery { strategy: RecoveryStrategy },   // recoverable error
+    MaxTurns { count },                        // turn limit reached
+    Aborted { reason },                        // abort (content filter, deny, budget)
 }
 ```
 
-判斷順序（`resolve_next_step`）：
+Resolution order (`resolve_next_step`):
 
 1. `StopReason::ContentFilter` → `Aborted`
 2. `current_turn + 1 >= max_turns` → `MaxTurns`
-3. `StopReason::ToolUse` 且有工具呼叫 → 逐一過 `PermissionEngine.check()`：
-   - 任一 `Deny` → `Aborted`（安全優先，直接中止）
-   - 任一 `NeedsApproval` → `Interruption`（收集所有待核准項目）
-   - 全部 `Allow` → `Continue`
-4. `StopReason::MaxTokens` → `Recovery`（先 ContinueMessage，兩次後升級 EscalateOutputTokens）
+3. `StopReason::ToolUse` with tool calls → each goes through `PermissionEngine.check()`:
+   - any `Deny` → `Aborted` (safety first — abort immediately)
+   - any `NeedsApproval` → `Interruption` (collect all pending approvals)
+   - all `Allow` → `Continue`
+4. `StopReason::MaxTokens` → `Recovery` (ContinueMessage first, escalating to
+   EscalateOutputTokens after two attempts)
 5. `EndTurn` / `StopSequence` → `FinalOutput`
 
-### 2.2 自主判斷「是否要繼續」
+### 2.2 Deciding autonomously whether to keep going
 
-關鍵設計：**模型說「我講完了」（`FinalOutput`）不代表迴圈真的結束**。在真正回覆用戶之前，`drive()` 依序做三道「續跑檢查」：
+Key design point: **the model saying "I'm done" (`FinalOutput`) does not mean the loop
+actually ends.** Before replying to the user, `drive()` runs three "keep-going checks"
+in order:
 
-**檢查 1 — Output guardrails**：先驗證最終輸出；未通過直接以 `RunError::Guardrail` 終止。
+**Check 1 — Output guardrails**: validate the final output first; a failure terminates
+immediately with `RunError::Guardrail`.
 
-**檢查 2 — 背景任務未完成 → 不准結束**（`await_background_tasks`）：
-如果 TaskStore 裡還有 `Pending` / `Running` 的背景任務（通常是 background sub-agent），迴圈會阻塞等待（200ms 輪詢，上限 10 分鐘），直到至少一個任務到達終止狀態，把結果包成 `[background task completed/failed]` 的 user message 注入對話，然後 `continue` 回主迴圈讓模型針對結果反應。這保證 main agent 永遠不會在 sub-agent 還在跑時就對用戶說「做完了」。
+**Check 2 — Unfinished background tasks block exit** (`await_background_tasks`):
+If the TaskStore still holds `Pending` / `Running` background tasks (usually background
+sub-agents), the loop blocks (200 ms polling, 10-minute ceiling) until at least one task
+reaches a terminal state, wraps the result as a `[background task completed/failed]` user
+message injected into the conversation, then `continue`s back into the main loop so the
+model can react. This guarantees the main agent never tells the user "done" while a
+sub-agent is still running.
 
-**檢查 3 — Todo 未完成 → 注入續跑提示**（`todo_continuation_prompt`）：
-如果 TodoList 還有非 `Completed` 的項目，注入一則列出未完成項目的 user message（`You have N incomplete todo item(s). Continue working through them: …`），讓模型繼續執行。為避免模型卡死造成無限迴圈，**連續 todo 續跑最多 3 次**（`todo_continuation_count`，任何一次正常 `Continue` 都會歸零重計）。
+**Check 3 — Incomplete todos inject a continuation prompt** (`todo_continuation_prompt`):
+If the TodoList still has non-`Completed` items, a user message listing them is injected
+(`You have N incomplete todo item(s). Continue working through them: …`) so the model
+keeps working. To avoid an infinite loop if the model gets stuck, **consecutive todo
+continuations are capped at 3** (`todo_continuation_count`, reset by any normal
+`Continue`).
 
-三道檢查都通過後，才發出 `AgentEnd` 事件並回傳 `RunResult` 給用戶。
+Only after all three checks pass does the loop emit `AgentEnd` and return a `RunResult`.
 
-### 2.3 何時回應用戶、等待用戶輸入
+### 2.3 When the loop yields to the user
 
-迴圈把控制權交還用戶的時機只有幾種：
+The loop hands control back to the user in only a few situations:
 
-| 情境 | 行為 |
+| Situation | Behavior |
 |---|---|
-| `FinalOutput` 且無未完成任務/todo | 回傳最終答案，run 結束 |
-| `Interruption` 且**有** `approval_handler` | 不返回——inline 等待 handler（TUI 彈出核准 UI），拿到決定後繼續迴圈 |
-| `Interruption` 且**無** handler | 把 `pending_approvals` 記進 `RunState` 後返回 `RunResult`；呼叫端之後可用 `Input::Resume { state }` 續跑 |
-| `MaxTurns` / `Aborted` / Recovery 耗盡 | 帶著目前狀態返回或回傳錯誤 |
+| `FinalOutput` with no unfinished tasks/todos | Return the final answer; run ends |
+| `Interruption` **with** an `approval_handler` | Doesn't return — waits inline on the handler (TUI shows the approval UI), then continues the loop with the decision |
+| `Interruption` **without** a handler | Records `pending_approvals` in `RunState` and returns a `RunResult`; the caller can later resume with `Input::Resume { state }` |
+| `MaxTurns` / `Aborted` / recovery exhausted | Return with current state or an error |
 
-也就是說「等待用戶提供更多資訊」有兩種形態：**同步 HITL**（approval handler 阻塞在 UI 上）與**非同步暫停**（無 handler 時把狀態序列化返回，之後 Resume）。
+So "waiting for the user" comes in two forms: **synchronous HITL** (the approval handler
+blocks on the UI) and **asynchronous pause** (no handler — state is serialized and
+returned, resumed later).
 
-### 2.4 每輪的資源護欄
+### 2.4 Per-turn resource guardrails
 
-- **Turn limit**：`agent.max_turns` 覆寫 `config.max_turns`，Phase 0 檢查。
-- **Budget**：每輪累計 usage 換算成本（`accumulate_usage`），超過 `config.budget_usd` 立即 `Aborted("budget_exceeded")`。
-- **Context 壓縮**：每輪 Phase 1 跑 3 層 `CompactionPipeline`（`compaction/mod.rs`）——由輕到重：`tools_compact`（清除過期工具結果，零成本）→ `session_memory`（注入 session 記憶，零成本）→ `full_summarize`（一次 LLM 呼叫做結構化摘要）。任一層把 token 壓到門檻以下即停；連續失敗 3 次觸發斷路器停用壓縮。
-- **串流消費者斷線**：每輪開始時發 `TurnStart`，發送失敗（stream 被 drop）即以 `Aborted("stream_dropped")` 結束，避免孤兒 run 繼續燒錢。
+- **Turn limit**: `agent.max_turns` overrides `config.max_turns`; checked in Phase 0.
+- **Budget**: usage is accumulated into cost each turn (`accumulate_usage`); exceeding
+  `config.budget_usd` immediately yields `Aborted("budget_exceeded")`.
+- **Context compaction**: Phase 1 runs the 3-layer `CompactionPipeline`
+  (`compaction/mod.rs`) each turn, lightest first: `tools_compact` (drop stale tool
+  results, zero cost) → `session_memory` (inject session memory, zero cost) →
+  `full_summarize` (one LLM call producing a structured summary). The pipeline stops at
+  the first layer that gets tokens under the threshold; 3 consecutive failures trip a
+  circuit breaker that disables compaction.
+- **Dropped stream consumer**: `TurnStart` is emitted at the start of every turn; if the
+  send fails (the stream was dropped) the run ends with `Aborted("stream_dropped")` so an
+  orphaned run doesn't keep burning money.
 
 ---
 
-## 3. HITL 權限控制（Human-in-the-Loop）
+## 3. HITL permission control (Human-in-the-Loop)
 
-### 3.1 兩個層次：Tool 宣告 + 引擎裁決
+### 3.1 Two levels: tool declaration + engine verdict
 
-每個工具透過 `Tool::approval_requirement()`（`tool.rs`）宣告自身風險等級：
+Every tool declares its own risk level via `Tool::approval_requirement()` (`tool.rs`):
 
 ```rust
 pub enum ApprovalRequirement {
-    Never,                 // 從不需核准（預設，如唯讀工具）
-    Always,                // 每次都要核准（如 bash、file_write）
-    Conditional(String),   // 條件式，附說明（如「寫入 /etc 時」）
+    Never,                 // never needs approval (default; e.g. read-only tools)
+    Always,                // approval every time (e.g. bash, file_write)
+    Conditional(String),   // conditional, with a reason (e.g. "when writing to /etc")
 }
 ```
 
-實際裁決由 `PermissionEngine`（`permission.rs`）做，**4 層短路評估**：
+The actual verdict comes from the `PermissionEngine` (`permission.rs`) via **4-layer
+short-circuit evaluation**:
 
 ```
-Layer 1  Mode        Bypass → 全放行；DenyAll → 全拒絕；Normal → 往下
-Layer 2  靜態規則     static_deny 命中 → Deny（deny 優先於 allow）
-                     static_allow 命中 → Allow
-Layer 3  Session 規則 本地 session_allows 或共享 shared_session_grants 命中 → Allow
-Layer 4  工具宣告     Never → Allow；Always/Conditional → NeedsApproval
+Layer 1  Mode           Bypass → allow all; DenyAll → deny all; Normal → fall through
+Layer 2  Static rules   static_deny match → Deny (deny wins over allow)
+                        static_allow match → Allow
+Layer 3  Session rules  local session_allows or shared shared_session_grants match → Allow
+Layer 4  Tool declaration  Never → Allow; Always/Conditional → NeedsApproval
 ```
 
-規則支援 pattern（`pattern.rs` 的 `ToolPattern`）：裸名稱（`bash`）、glob（`fs_*`）、複合式（`Bash(npm*)` —— 同時比對工具名與參數內容）。靜態規則可由設定檔載入（`settings.rs` 的 `MergedPolicy`）。
+Rules support patterns (`ToolPattern` in `pattern.rs`): bare names (`bash`), globs
+(`fs_*`), and compound forms (`Bash(npm*)` — matching both tool name and argument
+content). Static rules can be loaded from settings files (`MergedPolicy` in
+`settings.rs`).
 
-### 3.2 核准流程（Interruption）
+### 3.2 The approval flow (Interruption)
 
-當 `resolve_next_step` 收集到 `NeedsApproval` 的工具呼叫，回傳 `NextStep::Interruption { pending }`，主迴圈交給 `ApprovalHandler`（`config.rs`）：
+When `resolve_next_step` collects tool calls that `NeedsApproval`, it returns
+`NextStep::Interruption { pending }` and the main loop hands off to the
+`ApprovalHandler` (`config.rs`):
 
 ```rust
 pub trait ApprovalHandler: Send + Sync {
@@ -164,214 +204,333 @@ pub trait ApprovalHandler: Send + Sync {
 }
 
 pub enum ApprovalResponse {
-    Allow,                            // 只放行這一次
-    Deny,                             // 拒絕這一次
-    AlwaysAllow { pattern: String },  // 放行並註冊 session 級 pattern grant
+    Allow,                            // allow this one call
+    Deny,                             // deny this one call
+    AlwaysAllow { pattern: String },  // allow and register a session-level pattern grant
 }
 ```
 
-`ApprovalContext.agent_name` 標明是哪個（sub-）agent 在要求核准，TUI 可以據此顯示來源。回應處理（`drive()` 的 `Interruption` 分支）：
+`ApprovalContext.agent_name` identifies which (sub-)agent is asking, so the TUI can show
+the source. Response handling (the `Interruption` arm in `drive()`):
 
-- **Allow**：保留該工具結果，正常寫入對話。
-- **AlwaysAllow**：呼叫 `permissions.grant_session_allow(pattern)`——之後同 pattern 的呼叫在 Layer 3 直接放行，不再打擾用戶；同時保留本次結果。
-- **Deny**：丟棄工具結果，改注入一則 `is_error: true` 的 ToolResult（`Permission denied: tool 'x' was not approved by the user.`），**run 不中止**——模型會在下一輪看到拒絕訊息並自行調整做法。
+- **Allow**: keep the tool result and write it into the conversation normally.
+- **AlwaysAllow**: call `permissions.grant_session_allow(pattern)` — subsequent calls
+  matching the pattern pass at Layer 3 without prompting; the current result is kept.
+- **Deny**: discard the tool result and inject an `is_error: true` ToolResult
+  (`Permission denied: tool 'x' was not approved by the user.`) — **the run does not
+  stop**; the model sees the denial next turn and adjusts its approach.
 
-注意與 Layer 2 `Deny` 的差別：**靜態 deny 直接 `Aborted` 整個 run**（policy 層的硬規則）；**用戶互動式 Deny 只是拒絕單次呼叫**，對話繼續。
+Note the contrast with a Layer 2 `Deny`: **a static deny `Abort`s the entire run** (a
+hard policy rule); **an interactive user Deny only rejects that single call** and the
+conversation continues.
 
-無 handler 時（CI、非互動模式）有兩種選擇：不設 handler → run 暫停返回（見 2.3）；或掛 `DenyAllApprovalHandler` → 全部自動拒絕並記 warn log，迴圈不阻塞。
+Without a handler (CI, non-interactive mode) there are two options: set no handler → the
+run pauses and returns (see 2.3); or attach a `DenyAllApprovalHandler` → everything is
+auto-denied with a warn log and the loop never blocks.
 
-### 3.3 Session grant 的跨 agent 共享
+### 3.3 Sharing session grants across the agent tree
 
-`PermissionEngine` 可掛一個 `Arc<RwLock<Vec<ToolPattern>>>` 共享 grant 儲存（`with_shared_session_grants`）。Sub-agent 生成時（`sub_agent.rs::sub_agent_config`）會接上共享儲存，因此**用戶在委派過程中按下的 AlwaysAllow，整棵 agent 樹都看得到**，不會每個 sub-agent 都重複問一次。安全底線不變：session grant 位於 Layer 3，永遠壓不過 Layer 2 的 static_deny。
+The `PermissionEngine` can attach an `Arc<RwLock<Vec<ToolPattern>>>` shared grant store
+(`with_shared_session_grants`). Sub-agents connect to the shared store when spawned
+(`sub_agent.rs::sub_agent_config`), so **an AlwaysAllow the user grants during a
+delegation is visible to the whole agent tree** — no sub-agent asks the same question
+twice. The safety floor is unchanged: session grants live at Layer 3 and can never
+override a Layer 2 static_deny.
 
 ---
 
-## 4. Task 管理與 Todo 工具
+## 4. Task management and the Todo tool
 
-### 4.1 兩種實體：TaskEntry vs TodoItem
+### 4.1 Two entities: TaskEntry vs TodoItem
 
-`task_store.rs` 定義了兩個**用途不同但共存於同一個 `TaskStore`** 的實體：
+`task_store.rs` defines two entities with **different purposes that coexist in the same
+`TaskStore`**:
 
-| | `TodoItem`（計畫層） | `TaskEntry`（執行層） |
+| | `TodoItem` (planning layer) | `TaskEntry` (execution layer) |
 |---|---|---|
-| 代表什麼 | 模型的**工作計畫項目**（給用戶看的 checklist） | 一個**背景執行單位**（通常是 background sub-agent） |
-| 誰建立 | 模型透過 `todolist` 工具主動維護 | `SubAgentTool` 在 spawn 背景任務時自動註冊 |
-| 狀態 | `Pending → InProgress → Completed` | `Pending → Running → Completed / Failed / Killed` |
-| 對主迴圈的影響 | 未完成 → 觸發 todo 續跑提示（最多連續 3 次） | 未終止 → `FinalOutput` 被攔下，迴圈等待結果 |
-| 額外欄位 | `active_form`（顯示用） | `output`、`usage`、`dependencies`、`max_retries`、`acknowledged` |
+| Represents | An item in the model's **work plan** (a user-visible checklist) | A **background execution unit** (usually a background sub-agent) |
+| Created by | The model, via the `todolist` tool | `SubAgentTool`, automatically when spawning a background task |
+| States | `Pending → InProgress → Completed` | `Pending → Running → Completed / Failed / Killed` |
+| Effect on the main loop | Incomplete → triggers the todo continuation prompt (max 3 consecutive) | Non-terminal → `FinalOutput` is intercepted; the loop waits for results |
+| Extra fields | `active_form` (for display) | `output`, `usage`, `dependencies`, `max_retries`, `acknowledged` |
 
-兩者的關聯是**間接的、由模型語意銜接**：框架不強制 todo 與 task 一對一對應。典型模式是模型先用 todolist 拆解計畫（「1. 分析 A 模組 2. 分析 B 模組 3. 彙整」），再對其中可平行的項目各 spawn 一個 background sub-agent（產生 TaskEntry），收到結果通知後回頭把對應 todo 勾成 completed。主迴圈的兩道續跑檢查（背景任務 + todo）共同保證這個閉環在計畫全部完成前不會斷掉。
+The relationship between them is **indirect and bridged by model semantics**: the
+framework does not force a one-to-one todo↔task mapping. The typical pattern: the model
+first breaks the plan down with todolist ("1. analyze module A, 2. analyze module B,
+3. synthesize"), then spawns a background sub-agent (creating a TaskEntry) for each
+parallelizable item, and on receiving each result notification checks the corresponding
+todo off as completed. The main loop's two keep-going checks (background tasks + todos)
+together guarantee this feedback loop doesn't break before the plan is fully done.
 
-### 4.2 TodoListTool（模型面向的計畫工具）
+### 4.2 TodoListTool (the model-facing planning tool)
 
-`todolist_tool.rs` 實作 `Tool` trait，動作：`add`（content ≤1000 字、active_form ≤200 字）、`update`（改狀態）、`list`、`remove`、`clear_completed`。`Concurrency::Safe`、`ApprovalRequirement::Never`（預設）——維護計畫不需要用戶核准。
+`todolist_tool.rs` implements the `Tool` trait with actions: `add` (content ≤ 1000
+chars, active_form ≤ 200 chars), `update` (change status), `list`, `remove`,
+`clear_completed`. `Concurrency::Safe`, `ApprovalRequirement::Never` (default) —
+maintaining the plan needs no user approval.
 
-### 4.3 TaskStore trait 與生命週期
+### 4.3 The TaskStore trait and lifecycle
 
-`TaskStore`（async trait，記憶體實作在 `in_memory_task_store.rs`）提供：
+`TaskStore` (an async trait; in-memory implementation in `in_memory_task_store.rs`)
+provides:
 
-- **CRUD 與狀態機**：`create_task`（進 `Pending`）、`transition_task`（驗證合法轉移；進終止態時記 `completed_at`；Failed 且還有 retry 額度時重置回 `Pending` 並 `retry_count += 1`）。
-- **查詢**：`list_tasks`、`count_by_status`、`list_ready_tasks`（Pending 且依賴全滿足）、`list_blocked_tasks`（依賴未滿足）。
-- **通知協定**：`list_unacknowledged_terminal` + `acknowledge_task` —— 這是結果送回模型「恰好一次」的關鍵（見第 6 節）。
-- **GC**：`evict_acknowledged`、`evict_older_than`。
+- **CRUD and the state machine**: `create_task` (enters `Pending`), `transition_task`
+  (validates legal transitions; records `completed_at` on entering a terminal state; a
+  `Failed` task with retry budget left is reset to `Pending` with `retry_count += 1`).
+- **Queries**: `list_tasks`, `count_by_status`, `list_ready_tasks` (Pending with all
+  dependencies satisfied), `list_blocked_tasks` (dependencies unsatisfied).
+- **Notification protocol**: `list_unacknowledged_terminal` + `acknowledge_task` — the
+  key to exactly-once result delivery back to the model (see section 6).
+- **GC**: `evict_acknowledged`, `evict_older_than`.
 
-`TaskEntry.dependencies` 支援任務間依賴（B 等 A 完成才 ready）；依賴失敗以 `TaskStoreError::DependencyFailed` 呈現。
+`TaskEntry.dependencies` supports inter-task dependencies (B becomes ready only after A
+completes); a failed dependency surfaces as `TaskStoreError::DependencyFailed`.
 
-### 4.4 Agent 如何用 Task 管理長任務
+### 4.4 How an agent manages long tasks
 
-長任務的標準模式：
+The standard pattern for a long task:
 
-1. **拆解**：模型用 `todolist add` 建立可見計畫，逐項 `update` 為 `in_progress` → `completed`。
-2. **委派**：耗時且可獨立的子工作交給 background sub-agent，主對話不被長時間工具呼叫卡住，模型可以繼續處理其他 todo。
-3. **防早退**：`FinalOutput` 被背景任務檢查與 todo 檢查雙重攔截，模型「忘記還有事」時框架會把它拉回來。
-4. **可恢復**：run 因 Interruption（無 handler）暫停時，`RunState`（含 messages、pending_approvals）可序列化，之後 `Input::Resume { state }` 續跑。
+1. **Decompose**: the model builds a visible plan with `todolist add`, updating each item
+   `in_progress` → `completed` as it goes.
+2. **Delegate**: time-consuming, independent sub-work goes to background sub-agents so
+   the main conversation isn't blocked on long tool calls and the model can keep working
+   through other todos.
+3. **No early exit**: `FinalOutput` is double-gated by the background-task check and the
+   todo check — if the model "forgets" it has work left, the framework pulls it back.
+4. **Resumable**: when a run pauses on an `Interruption` (no handler), the `RunState`
+   (messages, pending_approvals) is serializable and can be resumed later with
+   `Input::Resume { state }`.
 
 ---
 
-## 5. Sub-Agent 運作機制
+## 5. How sub-agents work
 
-### 5.1 定義與註冊
+### 5.1 Definition and registration
 
-Sub-agent 以 `SubAgentDef`（`agent.rs`）掛在父 agent 上，實質是一個完整的 `Agent`（有自己的 instructions、tools、max_turns）包裝成父 agent 的一個工具（`SubAgentTool`，`sub_agent.rs`）：
+A sub-agent hangs off its parent as a `SubAgentDef` (`agent.rs`) — in essence a complete
+`Agent` (with its own instructions, tools, max_turns) wrapped as one of the parent's
+tools (`SubAgentTool`, `sub_agent.rs`):
 
 ```rust
 pub struct SubAgentDef {
-    pub agent: Arc<Agent>,          // 完整的子代理定義
-    pub tool_name: Option<String>,  // 曝露給模型的工具名
-    pub max_turns: Option<u32>,     // 覆寫父 config 的回合上限
-    pub background: bool,           // 前景 or 背景模式
+    pub agent: Arc<Agent>,          // the full child agent definition
+    pub tool_name: Option<String>,  // tool name exposed to the model
+    pub max_turns: Option<u32>,     // overrides the parent config's turn limit
+    pub background: bool,           // foreground or background mode
 }
 ```
 
-模型呼叫這個工具時傳 `{"task": "..."}`，`task` 字串成為 sub-agent 的初始 prompt。
+The model calls this tool with `{"task": "..."}`; the `task` string becomes the
+sub-agent's initial prompt.
 
-### 5.2 隔離模型（Claude-Code isolation）
+### 5.2 The isolation model (Claude-Code-style isolation)
 
-Sub-agent 在**全新的 RunLoop、空白訊息歷史**中啟動——看不到父對話，防止 context 污染，也讓父對話不必背負子任務的大量中間過程（只拿到最終結果）。設定繼承規則（`sub_agent_config()`）：
+A sub-agent starts in a **fresh RunLoop with an empty message history** — it cannot see
+the parent conversation, which prevents context pollution and spares the parent from
+carrying the sub-task's voluminous intermediate steps (it only gets the final result).
+Config inheritance rules (`sub_agent_config()`):
 
-- 複製父 `RunConfig`，`max_turns` 可被 `def.max_turns` 覆寫。
-- `agent_name` 設為子代理名稱 → 核准請求會標明來源。
-- `approval_handler` 透過 `Arc` 共享 → **子代理的 HITL 核准直接彈到父層的 UI**。
-- 掛上共享 session grant store → AlwaysAllow 跨 agent 生效（見 3.3）。
+- Copy the parent `RunConfig`; `max_turns` may be overridden by `def.max_turns`.
+- `agent_name` is set to the child's name → approval requests identify their source.
+- The `approval_handler` is shared via `Arc` → **the child's HITL approvals pop up
+  directly in the parent's UI**.
+- The shared session grant store is attached → AlwaysAllow works across agents (see 3.3).
 
-### 5.3 前景模式（`background: false`）
+### 5.3 Foreground mode (`background: false`)
 
-`run_foreground()`：同步 `run()` 子代理到完成，最終輸出以 `ToolOutput::Text` 回給父模型。子代理撞到 max_turns 時在輸出附註 `[Sub-agent reached turn limit of N]`；子代理出錯回 `ToolOutput::Error`（**對父 run 非致命**——父模型看到錯誤字串後自行決定重試或改道）。
+`run_foreground()`: synchronously `run()`s the child to completion; the final output goes
+back to the parent model as `ToolOutput::Text`. If the child hits max_turns, the output
+is annotated with `[Sub-agent reached turn limit of N]`; a child error returns
+`ToolOutput::Error` (**non-fatal to the parent run** — the parent model sees the error
+string and decides to retry or change course).
 
-### 5.4 背景模式（`background: true`）
+### 5.4 Background mode (`background: true`)
 
-`run_background()`，有 TaskStore 時的完整流程：
+`run_background()`, the full flow when a TaskStore is present:
 
-1. **先註冊、後 spawn**：先 `create_task`（描述含 agent 名與 prompt 前 80 字）拿到 `task_id`，確保父模型在收到工具回覆時就有可關聯的 ID。
-2. Spawn detached tokio task：轉移 `Running` → 執行 `run()` → 成功則 `transition_task(Completed, output)` + `update_task_usage`；失敗則 `transition_task(Failed, error)`。
-3. **Panic 隔離**：實際的 `run()` 再包一層 `tokio::spawn`，子代理 panic 時外層 bookkeeping task 仍能把狀態記成 Failed——否則 store 會永遠卡在 Running，主迴圈的等待邏輯就死鎖了。
-4. 立即回覆父模型：`Background task started: task_id=…` 並明確提示「結果會以 [background task completed] 通知送達，**收到前不要下結論**」。
+1. **Register before spawn**: `create_task` first (description includes the agent name
+   and the first 80 chars of the prompt) to get a `task_id`, so the parent model has a
+   correlatable ID in the tool reply.
+2. Spawn a detached tokio task: transition to `Running` → execute `run()` → on success
+   `transition_task(Completed, output)` + `update_task_usage`; on failure
+   `transition_task(Failed, error)`.
+3. **Panic isolation**: the actual `run()` is wrapped in an inner `tokio::spawn`, so if
+   the child panics the outer bookkeeping task can still record `Failed` — otherwise the
+   store would be stuck at `Running` forever and the main loop's wait logic would
+   deadlock.
+4. Reply to the parent model immediately: `Background task started: task_id=…`, with an
+   explicit note that the result will arrive as a `[background task completed]`
+   notification and **not to draw conclusions before it does**.
 
-沒有 TaskStore 時退化為 fire-and-forget（結果丟失，只回一個遞增序號），僅適合不在乎結果的旁路任務。
+Without a TaskStore this degrades to fire-and-forget (results are lost; only an
+incrementing sequence number is returned) — suitable only for side-channel tasks whose
+results don't matter.
 
 ---
 
-## 6. Main Agent 對多個 Sub-Agent 的協調
+## 6. Coordinating multiple sub-agents from the main agent
 
-### 6.1 併發執行
+### 6.1 Concurrent execution
 
-`SubAgentTool::concurrency()` 回傳 `Concurrency::Safe`——sub-agent 彼此隔離、不共享可變狀態，因此模型在**同一輪**發出的多個 sub-agent 呼叫會由 `StreamingToolExecutor`（`executor.rs`）平行執行（預設併發上限 8，`Exclusive` 工具則獨占執行）。搭配 background 模式，父模型可以一次撒出 N 個子任務後立刻繼續做別的事。
+`SubAgentTool::concurrency()` returns `Concurrency::Safe` — sub-agents are isolated from
+each other and share no mutable state, so multiple sub-agent calls issued by the model
+**in the same turn** run in parallel under the `StreamingToolExecutor` (`executor.rs`;
+default concurrency cap 8, `Exclusive` tools run exclusively). Combined with background
+mode, the parent model can fan out N sub-tasks at once and immediately move on.
 
-### 6.2 結果如何回到模型的對話（通知協定）
+### 6.2 How results get back into the model's conversation (notification protocol)
 
-背景任務的結果**必須進入模型讀得到的對話**，而不是只到 UI。兩條路徑，共用同一個去重機制：
+Background task results **must enter the conversation the model can read**, not just the
+UI. Two paths share one deduplication mechanism:
 
-**路徑 A — 回合邊界注入**（`drain_task_notifications`，Phase 0.5）：
-每輪開始時查 `list_unacknowledged_terminal()`，把每個已終止但未確認的任務包成：
+**Path A — injection at turn boundaries** (`drain_task_notifications`, Phase 0.5):
+At the start of every turn, `list_unacknowledged_terminal()` is queried and each
+terminated-but-unacknowledged task is wrapped as:
 
 ```
-[background task completed] Sub-agent 'researcher': …（task_id=…）
+[background task completed] Sub-agent 'researcher': … (task_id=…)
 Result: <output>
 ```
 
-（失敗則 `[background task failed]` + error）作為 user message 注入，並立刻 `acknowledge_task` ——**acknowledged 旗標保證每個結果恰好送達模型一次**，不會重複也不會遺漏。
+(or `[background task failed]` + error on failure), injected as a user message, then
+immediately `acknowledge_task`ed — **the acknowledged flag guarantees each result reaches
+the model exactly once**, no duplicates, no losses.
 
-**路徑 B — 終止前等待**（`await_background_tasks`，見 2.2 檢查 2）：
-模型想收尾但還有任務在跑時，阻塞等到下一個任務終止，注入通知後續跑。
+**Path B — waiting before exit** (`await_background_tasks`, see check 2 in 2.2):
+When the model wants to wrap up while tasks are still running, the loop blocks until the
+next task terminates, injects the notification, and keeps going.
 
-### 6.3 兩邊任務協調合作的保證
+### 6.3 Coordination guarantees
 
-| 保證 | 機制 |
+| Guarantee | Mechanism |
 |---|---|
-| 結果恰好一次送達模型 | `acknowledged` 旗標 + 注入後立即 acknowledge |
-| 不會在子任務完成前對用戶收尾 | `FinalOutput` 前的 `await_background_tasks` 攔截 |
-| 父模型能關聯「哪個委派 → 哪個結果」 | spawn 前先建 task 拿 `task_id`，通知中帶回同一 ID |
-| 子代理 panic 不會造成永久等待 | 雙層 spawn 的 panic 隔離 → 記為 Failed → 照常通知 |
-| 等待不會無限期 | 10 分鐘 deadline + 每次輪詢檢查 stream 是否已被 drop |
-| HITL 一致性 | 共享 approval handler + 共享 session grants（agent 樹一體適用） |
-| 成本可歸因 | 子代理 usage/cost 記入 TaskEntry.usage，父層可彙總 |
+| Results reach the model exactly once | `acknowledged` flag + acknowledge immediately after injection |
+| No wrapping up before sub-tasks finish | `await_background_tasks` gate before `FinalOutput` |
+| Parent can correlate delegation → result | task created before spawn to obtain `task_id`; the same ID comes back in the notification |
+| A child panic can't cause an infinite wait | two-level spawn panic isolation → recorded as Failed → notified as usual |
+| Waiting is bounded | 10-minute deadline + per-poll check that the stream hasn't been dropped |
+| HITL consistency | shared approval handler + shared session grants (uniform across the agent tree) |
+| Cost attribution | child usage/cost recorded in TaskEntry.usage; the parent can aggregate |
 
-CLI 層（`agent-cli`）同樣讀 TaskStore 來渲染背景任務狀態，但那是 UI 顯示；模型的認知一律走上述對話注入路徑。更深入的時序圖與已知限制見 [sub-agent-task-coordination.md](sub-agent-task-coordination.md)。
+The CLI layer (`agent-cli`) also reads the TaskStore to render background task status,
+but that is UI only; the model's knowledge always flows through the conversation
+injection paths above. For deeper sequence diagrams and known limits see
+[sub-agent-task-coordination.md](sub-agent-task-coordination.md).
 
 ---
 
-## 7. 錯誤處理與復原流程
+## 7. Error handling and recovery
 
-### 7.1 錯誤階層（`error.rs`）
+### 7.1 The error hierarchy (`error.rs`)
 
 ```
-RunError（run 層）
-├── Model(ModelError)      ← API 錯誤 / RateLimited / PromptTooLong /
+RunError (run level)
+├── Model(ModelError)      ← API error / RateLimited / PromptTooLong /
 │                             MaxOutputTokens / Connection / StreamInterrupted
 ├── Tool(ToolError)        ← InvalidInput / ExecutionFailed / Timeout / NotAvailable
 ├── MaxTurns / BudgetExceeded / Guardrail
-├── Aborted                ← content filter、權限 deny、stream 斷線、超預算
-└── RecoveryExhausted      ← 復原重試耗盡
+├── Aborted                ← content filter, permission deny, dropped stream, budget
+└── RecoveryExhausted      ← recovery retries exhausted
 ```
 
-### 7.2 分層處理原則
+### 7.2 Layered handling principles
 
-**工具錯誤：非致命，回饋給模型。** 工具執行失敗不會終止 run——錯誤字串以 `is_error: true` 的 ToolResult 寫回對話，模型下一輪看到後自行修正（重試、換參數、換方法）。模型呼叫不存在的工具也一樣（`NotFoundTool` 佔位工具回報 `NotAvailable`）。前景 sub-agent 的失敗同理，以 `ToolOutput::Error` 呈現。
+**Tool errors: non-fatal, fed back to the model.** A failed tool execution does not
+terminate the run — the error string is written back into the conversation as an
+`is_error: true` ToolResult, and the model corrects itself next turn (retry, change
+arguments, change approach). The same applies when the model calls a nonexistent tool
+(the `NotFoundTool` placeholder reports `NotAvailable`), and to foreground sub-agent
+failures, which surface as `ToolOutput::Error`.
 
-**模型錯誤：進復原系統。** `RecoveryTracker`（`recovery.rs`）把 `ModelError` 映射到策略並按錯誤變體分別計數：
+**Model errors: into the recovery system.** The `RecoveryTracker` (`recovery.rs`) maps
+each `ModelError` to a strategy, counting attempts per error variant:
 
-| 錯誤 | 策略 |
+| Error | Strategy |
 |---|---|
-| `PromptTooLong` | `CompactAndRetry` — 暴力裁掉最舊的非 system 訊息至半個 context window（正常壓縮是 Phase 1 pipeline 的事；這是 provider 仍拒絕時的最後手段） |
-| `MaxOutputTokens` | 前 2 次 `ContinueMessage`（注入「請從中斷處繼續」）；第 3 次 `EscalateOutputTokens`（加倍 max_output_tokens，上限為模型硬上限） |
+| `PromptTooLong` | `CompactAndRetry` — brute-force trim the oldest non-system messages down to half the context window (normal compaction is Phase 1's job; this is the last resort when the provider still refuses) |
+| `MaxOutputTokens` | First 2 attempts: `ContinueMessage` (inject "please continue from where you left off"); 3rd: `EscalateOutputTokens` (double max_output_tokens, capped at the model's hard limit) |
 | `StreamInterrupted` | `ContinueMessage` |
-| 其他（Api / RateLimited / Connection） | `GiveUp` |
+| Others (Api / RateLimited / Connection) | `GiveUp` |
 
-每個錯誤變體**獨立計數**，超過 `MAX_RECOVERY_ATTEMPTS = 3` 即 `GiveUp` → run 以 `RunError::RecoveryExhausted` 結束。復原重試**不消耗 turn 數**；任何一次成功的 `Continue` 會 `reset()` 全部計數。
+Each error variant is **counted independently**; exceeding `MAX_RECOVERY_ATTEMPTS = 3`
+means `GiveUp` → the run ends with `RunError::RecoveryExhausted`. Recovery retries
+**do not consume turns**; any successful `Continue` `reset()`s all counters.
 
-**Guardrail：硬性終止。** Input guardrails 在第一輪檢查輸入、output guardrails 在 `FinalOutput` 前檢查輸出，按註冊順序短路評估，任一失敗即發 `GuardrailTripped` 事件並回 `RunError::Guardrail`。
+**Guardrails: hard termination.** Input guardrails check the input on the first turn;
+output guardrails check the output before `FinalOutput`. They evaluate in registration
+order with short-circuiting; any failure emits a `GuardrailTripped` event and returns
+`RunError::Guardrail`.
 
-**背景任務錯誤：狀態化 + 通知。** Sub-agent 失敗/panic 記為 `TaskEntry::Failed`（含 `last_error`），以 `[background task failed]` 通知模型，由模型決定補救。`max_retries > 0` 時 store 會自動重置回 Pending 重試。
+**Background task errors: recorded as state + notified.** A sub-agent failure/panic is
+recorded as `TaskEntry::Failed` (with `last_error`) and reported to the model as a
+`[background task failed]` notification; the model decides how to remediate. With
+`max_retries > 0` the store automatically resets the task to Pending for a retry.
 
-### 7.3 終止事件的唯一性
+### 7.3 Uniqueness of the terminal event
 
-串流模式保證恰好一個終止事件：`AgentEnd`、`MaxTurns`、`Aborted`、`Error`、`Interruption`、`GuardrailTripped` 之一，TUI 據此收斂 UI 狀態。
+Streaming mode guarantees exactly one terminal event — one of `AgentEnd`, `MaxTurns`,
+`Aborted`, `Error`, `Interruption`, `GuardrailTripped` — which the TUI relies on to
+settle its UI state.
 
 ---
 
-## 8. 貫穿範例：一次長任務的完整生命週期
+## 8. End-to-end example: the full lifecycle of a long task
 
-**情境**：用戶要求——「分析這個 repo 的 A、B 兩個模組的效能瓶頸，然後產出一份綜合報告寫入 report.md」。Main agent 掛了 `todolist`、`file_write`（`ApprovalRequirement::Always`）、以及一個 `background: true` 的 `analyzer` sub-agent。
+**Scenario**: the user asks — "Analyze the performance bottlenecks of modules A and B in
+this repo, then produce a combined report written to report.md." The main agent has
+`todolist`, `file_write` (`ApprovalRequirement::Always`), and an `analyzer` sub-agent
+with `background: true`.
 
-**Turn 1 — 拆解計畫（Todo 工具）**
-模型呼叫 `todolist add` ×3：「分析模組 A」「分析模組 B」「彙整報告寫入 report.md」。三個工具呼叫都是 `Never` 核准等級，PermissionEngine Layer 4 放行 → `NextStep::Continue`。
+**Turn 1 — Decompose the plan (Todo tool)**
+The model calls `todolist add` ×3: "analyze module A", "analyze module B", "synthesize
+report into report.md". All three tool calls are approval level `Never`; PermissionEngine
+Layer 4 allows them → `NextStep::Continue`.
 
-**Turn 2 — 平行委派（Sub-Agent + Task）**
-模型同輪發出兩個 `analyzer` 呼叫（task 分別為模組 A、B），並把前兩個 todo 標為 `in_progress`。`SubAgentTool` 為 `Concurrency::Safe`，兩個呼叫由 executor 平行處理：各自先 `create_task` 拿到 `task_id=T1`、`T2`（`TaskEntry::Pending`），spawn detached task 後立刻回覆「Background task started: task_id=T1…收到通知前不要下結論」。兩個 sub-agent 在各自空白的 RunLoop 中開跑（`Running`），看不到父對話。
+**Turn 2 — Parallel delegation (Sub-Agent + Task)**
+The model issues two `analyzer` calls in the same turn (tasks for modules A and B) and
+marks the first two todos `in_progress`. `SubAgentTool` is `Concurrency::Safe`, so the
+executor runs both calls in parallel: each first `create_task`s to get `task_id=T1`, `T2`
+(`TaskEntry::Pending`), spawns a detached task, and immediately replies "Background task
+started: task_id=T1… don't draw conclusions until the notification arrives". Both
+sub-agents start running (`Running`) in their own blank RunLoops, unable to see the
+parent conversation.
 
-**Turn 3 — 子代理觸發 HITL**
-sub-agent A 需要跑 `bash` 做 profiling（`Always`）。它自己的迴圈解析出 `Interruption`，透過**共享的 approval handler** 彈到父層 TUI，`ApprovalContext.agent_name = "analyzer"` 標明來源。用戶選 **AlwaysAllow(`Bash(cargo*)`)** → 寫入**共享 session grant store**。稍後 sub-agent B 跑到同樣的命令時，Layer 3 直接放行，用戶不會被問第二次。
+**Turn 3 — A sub-agent triggers HITL**
+Sub-agent A needs to run `bash` for profiling (`Always`). Its own loop resolves an
+`Interruption`, which surfaces in the parent's TUI via the **shared approval handler**,
+with `ApprovalContext.agent_name = "analyzer"` identifying the source. The user picks
+**AlwaysAllow(`Bash(cargo*)`)** → written to the **shared session grant store**. When
+sub-agent B later runs the same command, Layer 3 allows it directly — the user is never
+asked twice.
 
-**Turn 4 — 模型想提早收尾，被攔下**
-模型此時無事可做，輸出「兩個分析已啟動，完成後我會彙整」並 `EndTurn` → `FinalOutput`。但 `await_background_tasks` 發現 T1、T2 仍在 `Running`，**攔下終止**並阻塞等待。期間 sub-agent A 內部撞到 `MaxOutputTokens`——它自己的 `RecoveryTracker` 注入 ContinueMessage 續寫，不影響父層。
+**Turn 4 — The model tries to wrap up early and is intercepted**
+With nothing left to do, the model outputs "both analyses are running; I'll synthesize
+when they finish" and `EndTurn` → `FinalOutput`. But `await_background_tasks` finds T1
+and T2 still `Running`, **intercepts the exit**, and blocks. Meanwhile sub-agent A hits
+`MaxOutputTokens` internally — its own `RecoveryTracker` injects a ContinueMessage and it
+keeps writing, without affecting the parent.
 
-**Turn 5 — 結果回流**
-Sub-agent A 完成：`transition_task(T1, Completed, output)` + usage 入帳。等待中的父迴圈 drain 出 `[background task completed] … (task_id=T1) Result: <A 模組分析>`，acknowledge T1（恰好一次），注入 user message 後續跑。模型把 todo「分析模組 A」勾成 `completed`。B 完成時同理（若 B panic，則收到 `[background task failed]`，模型可改為 foreground 重試）。
+**Turn 5 — Results flow back**
+Sub-agent A finishes: `transition_task(T1, Completed, output)` + usage recorded. The
+waiting parent loop drains `[background task completed] … (task_id=T1) Result: <module A
+analysis>`, acknowledges T1 (exactly once), injects the user message, and continues. The
+model checks the "analyze module A" todo off as `completed`. Same for B (if B panics, a
+`[background task failed]` arrives instead and the model can retry in the foreground).
 
-**Turn 6 — 寫檔觸發 HITL（主層）**
-模型彙整兩份結果，呼叫 `file_write` 寫 report.md。`Always` → `Interruption`，TUI 顯示 diff，用戶按 **Allow**（單次）。結果保留，todo 第三項勾成 `completed`。
+**Turn 6 — Writing the file triggers HITL (main level)**
+The model synthesizes both results and calls `file_write` for report.md. `Always` →
+`Interruption`; the TUI shows a diff and the user presses **Allow** (one-time). The
+result is kept and the third todo is checked off as `completed`.
 
-**Turn 7 — 合法收尾**
-模型輸出總結並 `EndTurn` → `FinalOutput`。三道檢查依序通過：output guardrails OK；TaskStore 無 Pending/Running（T1、T2 皆已 acknowledged）；TodoList 全部 `Completed`（若模型忘了勾第三項，這裡會注入續跑提示把它拉回來，最多 3 次）。發出 `AgentEnd`，`RunResult` 帶回輸出、累計 usage/cost 與完整 `RunState`。
+**Turn 7 — A legitimate wrap-up**
+The model outputs a summary and `EndTurn` → `FinalOutput`. All three checks pass in
+order: output guardrails OK; no Pending/Running in the TaskStore (T1 and T2 both
+acknowledged); the TodoList fully `Completed` (had the model forgotten the third item, a
+continuation prompt would pull it back here, up to 3 times). `AgentEnd` is emitted and
+the `RunResult` carries the output, accumulated usage/cost, and the full `RunState`.
 
-這個範例走過了：NextStep 狀態機（Continue / Interruption / FinalOutput）、三道終止前檢查、4 層權限引擎與跨 agent 的 session grant、Todo 計畫層與 Task 執行層的分工、背景 sub-agent 的註冊-執行-通知-確認閉環、平行協調，以及模型層與任務層各自獨立的錯誤復原。
+This example exercised: the NextStep state machine (Continue / Interruption /
+FinalOutput), the three pre-exit checks, the 4-layer permission engine and cross-agent
+session grants, the division between the Todo planning layer and the Task execution
+layer, the background sub-agent's register-execute-notify-acknowledge loop, parallel
+coordination, and the independent error recovery at the model layer and the task layer.
