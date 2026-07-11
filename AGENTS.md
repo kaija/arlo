@@ -41,7 +41,7 @@ All paths relative to `crates/`.
 
 Deep dives (read before touching the corresponding area):
 `doc/agent-framework.md` (full architecture, in Chinese), `doc/sub-agent-task-coordination.md`
-(sequence diagrams + known limits), `doc/claude-code-agentic-loop.md` (design reference).
+(sequence diagrams + known limits).
 
 ## Core model (read this before changing the loop)
 
