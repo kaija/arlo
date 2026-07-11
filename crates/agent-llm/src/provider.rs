@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use agent_core::config_resolver::ResolvedProfile;
 use agent_core::error::ModelError;
 use agent_core::model::{Model, ModelProvider, ModelRequest, ModelResponse, ModelStream};
 
@@ -140,6 +141,72 @@ impl UnifiedProvider {
         if !provider.has_any_provider() {
             return Err(ModelError::Connection(
                 "No provider configured: at least one provider must have credentials".to_string(),
+            ));
+        }
+
+        Ok(provider)
+    }
+
+    /// Construct a `UnifiedProvider` from a resolved profile.
+    ///
+    /// Uses the profile's `provider`, `api_key`, and `base_url` to configure
+    /// the appropriate backend, bypassing environment variable detection.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ModelError::Connection` if:
+    /// - The provider string is not recognized ("openai", "anthropic", or "ollama")
+    /// - No provider credentials are available after construction
+    pub fn from_profile(profile: &ResolvedProfile) -> Result<Self, ModelError> {
+        let default_provider = Some(profile.provider.clone());
+
+        let provider = match profile.provider.as_str() {
+            #[cfg(feature = "openai")]
+            "openai" => Self {
+                default_provider,
+                openai_key: profile.api_key.clone(),
+                openai_base_url: profile.base_url.clone(),
+                #[cfg(feature = "anthropic")]
+                anthropic_key: None,
+                #[cfg(feature = "ollama")]
+                ollama_host: None,
+            },
+            #[cfg(feature = "anthropic")]
+            "anthropic" => Self {
+                default_provider,
+                #[cfg(feature = "openai")]
+                openai_key: None,
+                #[cfg(feature = "openai")]
+                openai_base_url: None,
+                anthropic_key: profile.api_key.clone(),
+                #[cfg(feature = "ollama")]
+                ollama_host: None,
+            },
+            #[cfg(feature = "ollama")]
+            "ollama" => Self {
+                default_provider,
+                #[cfg(feature = "openai")]
+                openai_key: None,
+                #[cfg(feature = "openai")]
+                openai_base_url: None,
+                #[cfg(feature = "anthropic")]
+                anthropic_key: None,
+                ollama_host: profile
+                    .base_url
+                    .clone()
+                    .or_else(|| Some("http://localhost:11434".to_string())),
+            },
+            other => {
+                return Err(ModelError::Connection(format!(
+                    "Unknown provider '{}' in profile",
+                    other
+                )));
+            }
+        };
+
+        if !provider.has_any_provider() {
+            return Err(ModelError::Connection(
+                "Profile resolved but no provider credentials available".to_string(),
             ));
         }
 
@@ -680,6 +747,97 @@ mod tests {
         let model = provider.resolve("openai:gpt-4:2024-01-01").await.unwrap();
         assert_eq!(model.name(), "gpt-4:2024-01-01");
         assert_eq!(model.provider(), "openai");
+    }
+
+    // --- from_profile() unit tests ---
+
+    /// Helper to create a minimal ResolvedProfile for testing.
+    fn make_resolved_profile(
+        provider: &str,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> ResolvedProfile {
+        ResolvedProfile {
+            provider: provider.to_string(),
+            api_key: api_key.map(|s| s.to_string()),
+            base_url: base_url.map(|s| s.to_string()),
+            model: "test-model".to_string(),
+            context_window: None,
+            max_output_tokens: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn from_profile_openai_succeeds() {
+        let profile = make_resolved_profile("openai", Some("sk-test-key"), None);
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.default_provider.as_deref(), Some("openai"));
+        assert_eq!(provider.openai_key.as_deref(), Some("sk-test-key"));
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn from_profile_anthropic_succeeds() {
+        let profile = make_resolved_profile("anthropic", Some("sk-ant-key"), None);
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.default_provider.as_deref(), Some("anthropic"));
+        assert_eq!(provider.anthropic_key.as_deref(), Some("sk-ant-key"));
+    }
+
+    #[cfg(feature = "ollama")]
+    #[test]
+    fn from_profile_ollama_succeeds_with_default_base_url() {
+        let profile = make_resolved_profile("ollama", None, None);
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.default_provider.as_deref(), Some("ollama"));
+        // Should default to localhost if no base_url is given
+        assert_eq!(
+            provider.ollama_host.as_deref(),
+            Some("http://localhost:11434")
+        );
+    }
+
+    #[cfg(feature = "ollama")]
+    #[test]
+    fn from_profile_ollama_uses_provided_base_url() {
+        let profile =
+            make_resolved_profile("ollama", None, Some("http://custom-host:11434"));
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(
+            provider.ollama_host.as_deref(),
+            Some("http://custom-host:11434")
+        );
+    }
+
+    #[test]
+    fn from_profile_unknown_provider_returns_error() {
+        let profile = make_resolved_profile("unknown", Some("some-key"), None);
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_profile_unknown_provider_error_contains_name() {
+        let profile = make_resolved_profile("not-a-real-provider", Some("key"), None);
+        let result = UnifiedProvider::from_profile(&profile);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("not-a-real-provider"),
+            "Error message should contain the unknown provider name, got: {}",
+            msg
+        );
     }
 }
 

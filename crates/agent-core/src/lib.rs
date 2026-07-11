@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod compaction;
 pub mod config;
+pub mod config_resolver;
 pub mod error;
 pub mod event;
 pub mod executor;
@@ -18,6 +19,7 @@ pub mod stream;
 pub mod skill;
 pub mod sub_agent;
 pub mod pattern;
+pub mod profile;
 pub mod settings;
 pub mod task_store;
 pub mod in_memory_task_store;
@@ -55,6 +57,10 @@ pub use sub_agent::{SubAgentTool, SubAgentUsage};
 pub use skill::{
     render_skill_body, Skill, SkillArgument, SkillContext, SkillRegistry, SkillSource, SkillTool,
 };
+
+pub use profile::{ProfileConfig, ProfilesSection};
+
+pub use config_resolver::{ConfigError, ConfigInputs, ConfigResolver, ResolvedProfile};
 
 pub use task_store::{
     CreateTaskParams, TaskEntry, TaskId, TaskStatus, TaskStatusCounts, TaskStore, TaskStoreError,

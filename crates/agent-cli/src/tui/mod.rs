@@ -17,10 +17,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
 use agent_core::{
-    run_stream, Agent, ApprovalResponse, ContentBlock, Input, Instructions, Message,
+    run_stream, Agent, ApprovalResponse, ContentBlock, Input, Instructions, Message, ModelProvider,
     PermissionEngine, PermissionMode, RunConfig, TaskStore, Tool,
 };
-use agent_llm::UnifiedProvider;
 
 use self::app::{AppMode, AppState, OutputSpan, SpanStyle, UpdateResult};
 use self::approval::InteractiveApprovalHandler;
@@ -31,7 +30,7 @@ use self::event_loop::{spawn_stream_forwarder, spawn_terminal_poller, StreamForw
 /// Sets up the ratatui terminal, initializes session state, and drives the
 /// event loop that multiplexes terminal input with agent RunStream events.
 pub async fn run_tui_repl(
-    provider: Arc<UnifiedProvider>,
+    provider: Arc<dyn ModelProvider>,
     model: &str,
     tools: Vec<Arc<dyn Tool>>,
     instructions: Instructions,

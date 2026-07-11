@@ -15,32 +15,65 @@ use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use agent_core::{
-    run, Agent, DenyAllApprovalHandler, InMemoryTaskStore, Input, Instructions, ModelProvider,
-    PermissionEngine, PermissionMode, RunConfig, SkillRegistry, SkillTool, SubAgentDef,
-    SubAgentTool, TaskStore, TodoListTool, Tool,
+    run, Agent, ConfigError, ConfigInputs, ConfigResolver, DenyAllApprovalHandler,
+    InMemoryTaskStore, Input, Instructions, Model, ModelError, ModelProvider, PermissionEngine,
+    PermissionMode, RunConfig, SkillRegistry, SkillTool, SubAgentDef, SubAgentTool, TaskStore,
+    TodoListTool, Tool,
 };
-use agent_llm::UnifiedProvider;
+use agent_llm::{ModelOverrideWrapper, UnifiedProvider};
 use agent_tools::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
 
+/// A wrapping `ModelProvider` that applies `ModelOverrideWrapper` after resolving a model.
+///
+/// When a profile specifies `context_window` or `max_output_tokens`, the resolved model
+/// is wrapped to override those values. If no overrides are present, the inner model
+/// is returned directly (zero-cost passthrough).
+struct OverridingProvider {
+    inner: Arc<UnifiedProvider>,
+    context_window: Option<usize>,
+    max_output_tokens: Option<usize>,
+}
+
+#[async_trait]
+impl ModelProvider for OverridingProvider {
+    async fn resolve(&self, model_name: &str) -> Result<Arc<dyn Model>, ModelError> {
+        let base_model = self.inner.resolve(model_name).await?;
+        Ok(ModelOverrideWrapper::wrap_if_needed(
+            base_model,
+            self.context_window,
+            self.max_output_tokens,
+        ))
+    }
+
+    fn available_models(&self) -> Vec<String> {
+        self.inner.available_models()
+    }
+}
+
 /// Parsed CLI options.
+#[derive(Debug)]
 struct CliArgs {
     model: Option<String>,
+    profile: Option<String>,
     prompt: Option<String>,
     dump_prompt: bool,
     /// When true, skip all permission checks (bypass mode).
     skip_permissions: bool,
 }
 
-/// Parse CLI arguments manually (no clap dependency needed).
+/// Parse CLI arguments from a given slice (testable version).
 ///
-/// Usage: arlo [--model MODEL] [--dump-prompt] [PROMPT...]
+/// `args` should NOT include the binary name (argv[0]) — only the user-supplied flags and positional args.
+///
+/// Usage: arlo [--model MODEL] [--profile NAME] [--dump-prompt] [PROMPT...]
 ///
 /// Returns parsed CLI arguments.
-fn parse_args() -> Result<CliArgs, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
+fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
     let mut model: Option<String> = None;
+    let mut profile: Option<String> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut dump_prompt = false;
     let mut skip_permissions = false;
@@ -54,6 +87,13 @@ fn parse_args() -> Result<CliArgs, String> {
                     return Err("--model requires a value".to_string());
                 }
                 model = Some(args[i].clone());
+            }
+            "--profile" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--profile requires a value".to_string());
+                }
+                profile = Some(args[i].clone());
             }
             "--dump-prompt" => {
                 dump_prompt = true;
@@ -83,10 +123,21 @@ fn parse_args() -> Result<CliArgs, String> {
 
     Ok(CliArgs {
         model,
+        profile,
         prompt,
         dump_prompt,
         skip_permissions,
     })
+}
+
+/// Parse CLI arguments manually (no clap dependency needed).
+///
+/// Usage: arlo [--model MODEL] [--dump-prompt] [PROMPT...]
+///
+/// Returns parsed CLI arguments.
+fn parse_args() -> Result<CliArgs, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    parse_args_from(&args)
 }
 
 /// Print usage information.
@@ -97,6 +148,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <MODEL>   Model name (e.g., openai:gpt-4, anthropic:claude-sonnet-4-20250514)");
+    eprintln!("  --profile <NAME>  Use a named provider profile from settings");
     eprintln!("  --dump-prompt     Print the full system prompt (instructions + tool definitions) and exit");
     eprintln!("  --skip-permissions");
     eprintln!("                    Skip all permission checks (auto-approve every tool call)");
@@ -290,7 +342,7 @@ fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
 /// If a `TaskStore` is provided, `SubAgentTool` instances will be constructed with
 /// task tracking enabled via `with_task_store()`.
 async fn run_single_prompt(
-    provider: Arc<UnifiedProvider>,
+    provider: Arc<dyn ModelProvider>,
     model: &str,
     prompt: &str,
     tools: Vec<Arc<dyn Tool>>,
@@ -338,40 +390,92 @@ async fn main() {
         }
     };
 
-    // Initialize the unified provider from environment (not needed for --dump-prompt)
-    let provider = match UnifiedProvider::from_env() {
-        Ok(p) => Arc::new(p),
-        Err(e) => {
-            if cli.dump_prompt {
-                // For dump-prompt, provider isn't strictly necessary but we
-                // still want to show the model resolution if possible.
-                eprintln!("warning: {}", e);
-                eprintln!();
-
-                // Load skills and tools anyway for the dump
-                let (skill_registry, skill_tools) = load_skills();
-                let mut tools = default_tools();
-                tools.extend(skill_tools);
-
-                let skill_prompt = skill_registry.system_prompt_section();
-                let instructions = if skill_prompt.is_empty() {
-                    Instructions::Static("(core prompt omitted in no-provider mode)".to_string())
-                } else {
-                    Instructions::Static(skill_prompt)
-                };
-
-                dump_prompt(&instructions, &tools);
-                process::exit(0);
-            }
-            eprintln!("error: {}", e);
-            eprintln!();
-            eprintln!("Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST");
-            process::exit(1);
-        }
+    // Resolve provider configuration via ConfigResolver (profile-based or env fallback)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let config_inputs = ConfigInputs {
+        profile_name: cli.profile.clone(),
+        model_override: cli.model.clone(),
+        working_dir: cwd.clone(),
     };
 
-    // Resolve the model name
-    let model = resolve_model_name(cli.model, &provider);
+    let (provider, model): (Arc<dyn ModelProvider>, String) =
+        match ConfigResolver::resolve(&config_inputs) {
+            Ok(Some(resolved)) => {
+                // Profile resolved successfully — construct provider from profile
+                let p = match UnifiedProvider::from_profile(&resolved) {
+                    Ok(p) => Arc::new(p),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        process::exit(1);
+                    }
+                };
+                let m = resolved.model.clone();
+                // Wrap with OverridingProvider if context_window or max_output_tokens are set
+                let provider: Arc<dyn ModelProvider> =
+                    if resolved.context_window.is_some() || resolved.max_output_tokens.is_some() {
+                        Arc::new(OverridingProvider {
+                            inner: p,
+                            context_window: resolved.context_window,
+                            max_output_tokens: resolved.max_output_tokens,
+                        })
+                    } else {
+                        p
+                    };
+                (provider, m)
+            }
+            Ok(None) => {
+                // No profiles configured — fall back to existing env-based behavior
+                match UnifiedProvider::from_env() {
+                    Ok(p) => {
+                        let p = Arc::new(p);
+                        let m = resolve_model_name(cli.model, &p);
+                        (p as Arc<dyn ModelProvider>, m)
+                    }
+                    Err(e) => {
+                        if cli.dump_prompt {
+                            // For dump-prompt, provider isn't strictly necessary but we
+                            // still want to show the model resolution if possible.
+                            eprintln!("warning: {}", e);
+                            eprintln!();
+
+                            // Load skills and tools anyway for the dump
+                            let (skill_registry, skill_tools) = load_skills();
+                            let mut tools = default_tools();
+                            tools.extend(skill_tools);
+
+                            let skill_prompt = skill_registry.system_prompt_section();
+                            let instructions = if skill_prompt.is_empty() {
+                                Instructions::Static(
+                                    "(core prompt omitted in no-provider mode)".to_string(),
+                                )
+                            } else {
+                                Instructions::Static(skill_prompt)
+                            };
+
+                            dump_prompt(&instructions, &tools);
+                            process::exit(0);
+                        }
+                        eprintln!("error: {}", e);
+                        eprintln!();
+                        eprintln!(
+                            "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST"
+                        );
+                        process::exit(1);
+                    }
+                }
+            }
+            Err(ConfigError::UnknownProfile { name }) => {
+                eprintln!("error: unknown profile '{}'", name);
+                process::exit(1);
+            }
+            Err(ConfigError::MissingCredentials { provider, profile }) => {
+                eprintln!(
+                    "error: profile '{}' requires API key for '{}' (set env var or add api_key to profile)",
+                    profile, provider
+                );
+                process::exit(1);
+            }
+        };
 
     // Load skills from .arlo/skills/ directories
     let (skill_registry, skill_tools) = load_skills();
@@ -537,5 +641,45 @@ Additional tool guidance:
                 process::exit(1);
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for valid profile names: alphanumeric + hyphens + underscores, non-empty.
+    fn valid_profile_name() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}".prop_map(|s| s)
+    }
+
+    proptest! {
+        /// **Validates: Requirements 3.1**
+        ///
+        /// Property 15: CLI --profile parsing round-trip
+        /// For any valid profile name string, parsing CLI args ["--profile", name]
+        /// SHALL produce CliArgs with profile == Some(name).
+        #[test]
+        fn prop_profile_flag_roundtrip(name in valid_profile_name()) {
+            let args = vec!["--profile".to_string(), name.clone()];
+            let result = parse_args_from(&args).unwrap();
+            prop_assert_eq!(result.profile, Some(name));
+            // Other fields should be their defaults
+            prop_assert_eq!(result.model, None);
+            prop_assert_eq!(result.prompt, None);
+            prop_assert!(!result.dump_prompt);
+            prop_assert!(!result.skip_permissions);
+        }
+    }
+
+    /// Verify that `--profile` without a following value produces an error.
+    #[test]
+    fn test_profile_flag_missing_value() {
+        let args = vec!["--profile".to_string()];
+        let result = parse_args_from(&args);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "--profile requires a value");
     }
 }

@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::pattern::ToolPattern;
+use crate::profile::ProfilesSection;
 
 /// A parsed settings file containing allow and deny rules.
 ///
@@ -34,6 +35,18 @@ pub struct MergedPolicy {
     pub deny: Vec<ToolPattern>,
     /// Ordered allow rules (first match wins within this list).
     pub allow: Vec<ToolPattern>,
+}
+
+/// Extended settings file structure (backward compatible).
+///
+/// Holds both the existing permissions and the optional profiles section.
+/// Used by `SettingsLoader::load_extended()` to parse the full settings file.
+#[derive(Debug, Clone, Default)]
+pub struct ExtendedSettingsFile {
+    /// Existing permissions (unchanged behavior).
+    pub permissions: SettingsFile,
+    /// New: provider profiles (`None` if `"profiles"` key absent).
+    pub profiles: Option<ProfilesSection>,
 }
 
 /// Loads and parses settings files from well-known paths.
@@ -130,6 +143,71 @@ impl SettingsLoader {
                 }
             })
             .collect()
+    }
+
+    /// Load the extended settings file, parsing both `"permissions"` and `"profiles"`.
+    ///
+    /// This method parses both keys independently from the same JSON file.
+    /// - Returns defaults if the file doesn't exist or contains invalid JSON.
+    /// - The existing `load()` method remains unchanged for backward compatibility.
+    pub fn load_extended(path: &Path) -> ExtendedSettingsFile {
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to read settings file"
+                    );
+                }
+                return ExtendedSettingsFile {
+                    permissions: SettingsFile::default(),
+                    profiles: None,
+                };
+            }
+        };
+
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Settings file contains invalid JSON"
+                );
+                return ExtendedSettingsFile {
+                    permissions: SettingsFile::default(),
+                    profiles: None,
+                };
+            }
+        };
+
+        // Parse permissions using existing logic (independent of profiles)
+        let permissions = Self::parse_permissions(&json, path);
+
+        // Parse profiles independently (None if "profiles" key absent)
+        let profiles = json.get("profiles").map(ProfilesSection::from_value);
+
+        ExtendedSettingsFile {
+            permissions,
+            profiles,
+        }
+    }
+
+    /// Parse the `"permissions"` key from a JSON value into a `SettingsFile`.
+    ///
+    /// Returns `SettingsFile::default()` if the key is missing.
+    fn parse_permissions(json: &serde_json::Value, path: &Path) -> SettingsFile {
+        let permissions = match json.get("permissions") {
+            Some(p) => p,
+            None => return SettingsFile::default(),
+        };
+
+        let allow = Self::parse_pattern_array(permissions.get("allow"), path);
+        let deny = Self::parse_pattern_array(permissions.get("deny"), path);
+
+        SettingsFile { allow, deny }
     }
 }
 
@@ -1210,6 +1288,178 @@ mod tests {
                     merged.deny.len(), total_expected_deny,
                     "Deny count mismatch"
                 );
+            }
+        }
+
+        // ===================================================================
+        // Property 14: Profiles and permissions are independent
+        // **Validates: Requirements 8.2, 8.3**
+        // ===================================================================
+
+        /// Strategy for generating a valid permissions JSON object (with allow/deny arrays).
+        fn permissions_json_strategy() -> impl Strategy<Value = serde_json::Value> {
+            (
+                proptest::collection::vec(valid_pattern_strategy(), 0..4),
+                proptest::collection::vec(valid_pattern_strategy(), 0..4),
+            )
+                .prop_map(|(allow, deny)| {
+                    serde_json::json!({
+                        "allow": allow,
+                        "deny": deny
+                    })
+                })
+        }
+
+        /// Strategy for generating a valid profiles JSON object.
+        fn profiles_json_strategy() -> impl Strategy<Value = serde_json::Value> {
+            (
+                proptest::option::of("[a-z]{3,8}"),   // default profile name
+                proptest::collection::vec(
+                    (
+                        "[a-z]{3,8}",                // profile name
+                        proptest::option::of(prop_oneof![
+                            Just("openai".to_string()),
+                            Just("anthropic".to_string()),
+                            Just("ollama".to_string()),
+                        ]),
+                        proptest::option::of("[a-zA-Z0-9_-]{5,20}"), // api_key
+                        proptest::option::of("https?://[a-z0-9]{3,10}\\.[a-z]{2,4}"), // base_url
+                        proptest::option::of("[a-z]{3,10}-[0-9]{1,2}"), // model
+                    ),
+                    1..4,
+                ),
+            )
+                .prop_map(|(default_name, profile_entries)| {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(d) = &default_name {
+                        obj.insert("default".to_string(), serde_json::json!(d));
+                    }
+                    for (name, provider, api_key, base_url, model) in &profile_entries {
+                        let mut profile_obj = serde_json::Map::new();
+                        if let Some(p) = provider {
+                            profile_obj.insert("provider".to_string(), serde_json::json!(p));
+                        }
+                        if let Some(k) = api_key {
+                            profile_obj.insert("api_key".to_string(), serde_json::json!(k));
+                        }
+                        if let Some(u) = base_url {
+                            profile_obj.insert("base_url".to_string(), serde_json::json!(u));
+                        }
+                        if let Some(m) = model {
+                            profile_obj.insert("model".to_string(), serde_json::json!(m));
+                        }
+                        obj.insert(
+                            name.clone(),
+                            serde_json::Value::Object(profile_obj),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                })
+        }
+
+        proptest! {
+            /// Property 14: Profiles and permissions are independent.
+            ///
+            /// For any settings file containing both "profiles" and "permissions" keys,
+            /// loading and parsing one key SHALL not affect the parsed result of the other key.
+            ///
+            /// We verify this by:
+            /// 1. Changing the "profiles" content doesn't affect the parsed "permissions" result
+            /// 2. Changing the "permissions" content doesn't affect the parsed "profiles" result
+            /// 3. Both keys are parsed independently from the same file
+            ///
+            /// **Validates: Requirements 8.2, 8.3**
+            #[test]
+            fn profiles_and_permissions_are_independent(
+                permissions_a in permissions_json_strategy(),
+                permissions_b in permissions_json_strategy(),
+                profiles_a in profiles_json_strategy(),
+                profiles_b in profiles_json_strategy(),
+            ) {
+                use crate::profile::ProfilesSection;
+
+                let tmp = tempfile::TempDir::new().unwrap();
+
+                // --- Test 1: Changing profiles does NOT affect permissions ---
+                // Write file with permissions_a + profiles_a
+                let file_path = tmp.path().join("test1.json");
+                let content_1 = serde_json::json!({
+                    "permissions": permissions_a,
+                    "profiles": profiles_a
+                });
+                fs::write(&file_path, serde_json::to_string(&content_1).unwrap()).unwrap();
+                let result_1 = SettingsLoader::load_extended(&file_path);
+
+                // Write file with permissions_a + profiles_b (different profiles, same permissions)
+                let file_path_2 = tmp.path().join("test2.json");
+                let content_2 = serde_json::json!({
+                    "permissions": permissions_a,
+                    "profiles": profiles_b
+                });
+                fs::write(&file_path_2, serde_json::to_string(&content_2).unwrap()).unwrap();
+                let result_2 = SettingsLoader::load_extended(&file_path_2);
+
+                // Permissions should be identical regardless of profiles content
+                prop_assert_eq!(
+                    result_1.permissions.allow.len(),
+                    result_2.permissions.allow.len(),
+                    "Permissions allow count differs when only profiles changed"
+                );
+                prop_assert_eq!(
+                    result_1.permissions.deny.len(),
+                    result_2.permissions.deny.len(),
+                    "Permissions deny count differs when only profiles changed"
+                );
+                for (i, (a, b)) in result_1.permissions.allow.iter()
+                    .zip(result_2.permissions.allow.iter()).enumerate()
+                {
+                    prop_assert_eq!(a, b,
+                        "Permissions allow[{}] differs when only profiles changed", i);
+                }
+                for (i, (a, b)) in result_1.permissions.deny.iter()
+                    .zip(result_2.permissions.deny.iter()).enumerate()
+                {
+                    prop_assert_eq!(a, b,
+                        "Permissions deny[{}] differs when only profiles changed", i);
+                }
+
+                // --- Test 2: Changing permissions does NOT affect profiles ---
+                // Write file with permissions_b + profiles_a (different permissions, same profiles)
+                let file_path_3 = tmp.path().join("test3.json");
+                let content_3 = serde_json::json!({
+                    "permissions": permissions_b,
+                    "profiles": profiles_a
+                });
+                fs::write(&file_path_3, serde_json::to_string(&content_3).unwrap()).unwrap();
+                let result_3 = SettingsLoader::load_extended(&file_path_3);
+
+                // Profiles should be identical regardless of permissions content
+                let profiles_from_1 = result_1.profiles.clone()
+                    .unwrap_or_else(ProfilesSection::default);
+                let profiles_from_3 = result_3.profiles.clone()
+                    .unwrap_or_else(ProfilesSection::default);
+
+                prop_assert_eq!(
+                    profiles_from_1.default,
+                    profiles_from_3.default,
+                    "Profiles default differs when only permissions changed"
+                );
+                prop_assert_eq!(
+                    profiles_from_1.profiles.len(),
+                    profiles_from_3.profiles.len(),
+                    "Profiles count differs when only permissions changed"
+                );
+                for (name, config_1) in &profiles_from_1.profiles {
+                    let config_3 = profiles_from_3.profiles.get(name);
+                    prop_assert!(
+                        config_3.is_some(),
+                        "Profile '{}' missing when only permissions changed", name
+                    );
+                    prop_assert_eq!(
+                        config_1, config_3.unwrap(),
+                        "Profile '{}' content differs when only permissions changed", name
+                    );
+                }
             }
         }
     }

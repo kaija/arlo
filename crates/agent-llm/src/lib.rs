@@ -13,11 +13,13 @@
 //! - `all-providers`: Enable all provider backends
 
 pub mod convert;
+pub mod model_override;
 pub mod openai_http;
 pub mod provider;
 pub mod retry;
 
 pub use agent_core;
+pub use model_override::ModelOverrideWrapper;
 pub use openai_http::OpenAIHttpModel;
 pub use provider::UnifiedProvider;
 pub use retry::RetryConfig;
