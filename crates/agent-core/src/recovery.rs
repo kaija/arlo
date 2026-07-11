@@ -55,7 +55,10 @@ impl RecoveryTracker {
 
     /// Get the current attempt count for a given error variant.
     pub fn attempts_for(&self, error: &ModelError) -> u32 {
-        self.attempts.get(error_variant_key(error)).copied().unwrap_or(0)
+        self.attempts
+            .get(error_variant_key(error))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Get the current attempt count for a given variant key string.
@@ -243,7 +246,9 @@ mod tests {
     #[test]
     fn test_rate_limited_gives_up() {
         let mut tracker = RecoveryTracker::new();
-        let error = ModelError::RateLimited { retry_after_ms: 5000 };
+        let error = ModelError::RateLimited {
+            retry_after_ms: 5000,
+        };
         let strategy = tracker.resolve_strategy(&error);
         assert!(matches!(strategy, RecoveryStrategy::GiveUp { .. }));
     }
@@ -294,8 +299,7 @@ mod tests {
             (1usize..1_000_000usize)
                 .prop_map(|tokens| RecoverableErrorKind::PromptTooLong { tokens }),
             Just(RecoverableErrorKind::MaxOutputTokens),
-            "[a-zA-Z0-9 _-]{1,30}"
-                .prop_map(|msg| RecoverableErrorKind::StreamInterrupted { msg }),
+            "[a-zA-Z0-9 _-]{1,30}".prop_map(|msg| RecoverableErrorKind::StreamInterrupted { msg }),
         ]
     }
 

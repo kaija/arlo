@@ -113,7 +113,13 @@ async fn drive(
         Ok(m) => m,
         Err(e) => {
             tracing::error!(error = %e, "model_resolution_error");
-            emit(tx, RunEvent::Error { error: format!("{}", e) }).await;
+            emit(
+                tx,
+                RunEvent::Error {
+                    error: format!("{}", e),
+                },
+            )
+            .await;
             return Err(RunError::Model(e));
         }
     };
@@ -318,7 +324,11 @@ async fn drive(
         // Budget enforcement: check if cost exceeds configured budget
         if let Some(budget) = config.budget_usd {
             if state.total_cost_usd > budget {
-                tracing::error!(budget = budget, cost = state.total_cost_usd, "budget_exceeded");
+                tracing::error!(
+                    budget = budget,
+                    cost = state.total_cost_usd,
+                    "budget_exceeded"
+                );
                 emit(
                     tx,
                     RunEvent::Aborted {
@@ -357,12 +367,8 @@ async fn drive(
             NextStep::FinalOutput { text, structured } => {
                 // Check output guardrails before delivering the final output
                 if let Some((guardrail_name, reason)) =
-                    check_output_guardrails(
-                        &agent.output_guardrails,
-                        &text,
-                        structured.as_ref(),
-                    )
-                    .await
+                    check_output_guardrails(&agent.output_guardrails, &text, structured.as_ref())
+                        .await
                 {
                     emit(
                         tx,
@@ -442,7 +448,13 @@ async fn drive(
             }
 
             NextStep::Aborted { reason } => {
-                emit(tx, RunEvent::Aborted { reason: reason.clone() }).await;
+                emit(
+                    tx,
+                    RunEvent::Aborted {
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
                 return Err(RunError::Aborted(reason));
             }
 
@@ -486,7 +498,8 @@ async fn drive(
                     // Inject denial results for denied tools
                     for (pa, response) in &approval_decisions {
                         if matches!(response, ApprovalResponse::Deny) {
-                            let tool_use_id = pa.request_id
+                            let tool_use_id = pa
+                                .request_id
                                 .strip_prefix("approval-")
                                 .unwrap_or(&pa.request_id)
                                 .to_string();
@@ -728,9 +741,7 @@ fn apply_recovery_run(
             RecoveryOutcome::Retry
         }
 
-        RecoveryStrategy::GiveUp { error } => {
-            RecoveryOutcome::GiveUp(error.clone())
-        }
+        RecoveryStrategy::GiveUp { error } => RecoveryOutcome::GiveUp(error.clone()),
     }
 }
 
@@ -741,9 +752,10 @@ fn snip_history(messages: &mut Vec<Message>, max_tokens: usize) {
         let last_user = messages
             .iter()
             .rposition(|m| matches!(m, Message::User { .. }));
-        let removable = messages.iter().enumerate().position(|(idx, m)| {
-            !matches!(m, Message::System { .. }) && Some(idx) != last_user
-        });
+        let removable = messages
+            .iter()
+            .enumerate()
+            .position(|(idx, m)| !matches!(m, Message::System { .. }) && Some(idx) != last_user);
         match removable {
             Some(idx) => {
                 messages.remove(idx);
@@ -759,11 +771,7 @@ fn snip_history(messages: &mut Vec<Message>, max_tokens: usize) {
 fn initialize_state(agent: &Agent, input: &Input) -> RunState {
     match input {
         Input::Fresh { prompt } => {
-            let mut state = RunState::new(
-                Uuid::new_v4().to_string(),
-                None,
-                agent.max_turns,
-            );
+            let mut state = RunState::new(Uuid::new_v4().to_string(), None, agent.max_turns);
             state.trace_id = Uuid::new_v4().to_string();
             state.messages.push(Message::User {
                 content: vec![ContentBlock::Text {
@@ -773,16 +781,12 @@ fn initialize_state(agent: &Agent, input: &Input) -> RunState {
             state
         }
         Input::Items { messages } => {
-            let mut state = RunState::new(
-                Uuid::new_v4().to_string(),
-                None,
-                agent.max_turns,
-            );
+            let mut state = RunState::new(Uuid::new_v4().to_string(), None, agent.max_turns);
             state.trace_id = Uuid::new_v4().to_string();
             state.messages = messages.clone();
             state
         }
-        Input::Resume { state } => state.clone(),
+        Input::Resume { state } => (**state).clone(),
     }
 }
 
@@ -883,9 +887,7 @@ async fn consume_stream(
         content.push(ContentBlock::Text { text: full_text });
     }
     for tu in &tool_uses {
-        content.push(ContentBlock::ToolUse {
-            block: tu.clone(),
-        });
+        content.push(ContentBlock::ToolUse { block: tu.clone() });
     }
 
     Ok((content, stop_reason, usage, tool_uses))
@@ -898,8 +900,7 @@ async fn execute_tools(
     config: &RunConfig,
     state: &RunState,
 ) -> Vec<crate::executor::ToolResult> {
-    let mut executor =
-        StreamingToolExecutor::new(config.concurrency_limit as usize);
+    let mut executor = StreamingToolExecutor::new(config.concurrency_limit as usize);
 
     let ctx = ToolContext {
         session_id: state.session_id.clone().unwrap_or_default(),
@@ -912,7 +913,11 @@ async fn execute_tools(
             executor.enqueue(tu.clone(), Arc::clone(tool), ctx.clone());
         } else {
             // Tool not found — enqueue a placeholder that reports NotAvailable.
-            executor.enqueue(tu.clone(), Arc::new(NotFoundTool(tu.name.clone())), ctx.clone());
+            executor.enqueue(
+                tu.clone(),
+                Arc::new(NotFoundTool(tu.name.clone())),
+                ctx.clone(),
+            );
         }
     }
 
@@ -997,7 +1002,9 @@ fn resolve_next_step(
                 .map(|t| t.approval_requirement())
                 .unwrap_or(crate::tool::ApprovalRequirement::Never);
 
-            let decision = config.permissions.check(&tu.name, &approval_req, Some(&tu.input));
+            let decision = config
+                .permissions
+                .check(&tu.name, &approval_req, Some(&tu.input));
 
             match decision {
                 PermissionDecision::NeedsApproval { .. } => {
@@ -1098,10 +1105,8 @@ fn accumulate_usage(state: &mut RunState, usage: &Usage, model: &dyn crate::mode
     }
 
     // Calculate cost for this turn
-    let input_cost =
-        (usage.input_tokens as f64) * model.input_cost_per_million() / 1_000_000.0;
-    let output_cost =
-        (usage.output_tokens as f64) * model.output_cost_per_million() / 1_000_000.0;
+    let input_cost = (usage.input_tokens as f64) * model.input_cost_per_million() / 1_000_000.0;
+    let output_cost = (usage.output_tokens as f64) * model.output_cost_per_million() / 1_000_000.0;
     state.total_cost_usd += input_cost + output_cost;
 }
 
@@ -1116,7 +1121,9 @@ async fn check_input_guardrails(
     for guardrail in guardrails {
         let result = guardrail.check(messages).await;
         if !result.passed {
-            let reason = result.reason.unwrap_or_else(|| "guardrail check failed".to_string());
+            let reason = result
+                .reason
+                .unwrap_or_else(|| "guardrail check failed".to_string());
             return Some((guardrail.name().to_string(), reason));
         }
     }
@@ -1135,7 +1142,9 @@ async fn check_output_guardrails(
     for guardrail in guardrails {
         let result = guardrail.check(output, structured).await;
         if !result.passed {
-            let reason = result.reason.unwrap_or_else(|| "guardrail check failed".to_string());
+            let reason = result
+                .reason
+                .unwrap_or_else(|| "guardrail check failed".to_string());
             return Some((guardrail.name().to_string(), reason));
         }
     }
@@ -1161,9 +1170,7 @@ fn extract_text_from_last_assistant(messages: &[Message]) -> String {
         .iter()
         .rev()
         .find_map(|msg| match msg {
-            Message::Assistant { content, .. } => {
-                Some(extract_text_from_content(content))
-            }
+            Message::Assistant { content, .. } => Some(extract_text_from_content(content)),
             _ => None,
         })
         .unwrap_or_default()
@@ -1205,13 +1212,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "mock-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "mock-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     /// A mock model that invokes a tool.
@@ -1221,9 +1242,10 @@ mod tests {
     impl Model for ToolCallingModel {
         async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
             // If there are tool results in messages, respond with final text
-            let has_tool_result = request.messages.iter().any(|m| {
-                matches!(m, Message::ToolResult { .. })
-            });
+            let has_tool_result = request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult { .. }));
 
             if has_tool_result {
                 let chunks = vec![
@@ -1272,13 +1294,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "tool-calling-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "tool-calling-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     /// A mock provider that resolves to a specific model.
@@ -1301,8 +1337,12 @@ mod tests {
 
     #[async_trait]
     impl Tool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "Echoes input text" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes input text"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             json!({"type": "object", "properties": {"text": {"type": "string"}}})
         }
@@ -1469,7 +1509,7 @@ mod tests {
         let agent = Agent::builder("test").build();
         let original = RunState::new("run-42".into(), Some("sess-1".into()), Some(10));
         let input = Input::Resume {
-            state: original.clone(),
+            state: Box::new(original.clone()),
         };
         let state = initialize_state(&agent, &input);
         assert_eq!(state.run_id, "run-42");
@@ -1498,10 +1538,7 @@ mod tests {
 
     #[test]
     fn test_tool_output_to_string() {
-        assert_eq!(
-            tool_output_to_string(&ToolOutput::Text("hi".into())),
-            "hi"
-        );
+        assert_eq!(tool_output_to_string(&ToolOutput::Text("hi".into())), "hi");
         assert_eq!(
             tool_output_to_string(&ToolOutput::Structured(json!({"k": "v"}))),
             r#"{"k":"v"}"#
@@ -1521,7 +1558,6 @@ mod tests {
         assert_eq!(defs[0].name, "echo");
         assert_eq!(defs[0].description, "Echoes input text");
     }
-
 
     // --- Budget enforcement tests ---
 
@@ -1556,14 +1592,28 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "high-cost-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
+        fn name(&self) -> &str {
+            "high-cost-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
         // $10/M input, $30/M output — expensive model for easy budget trigger
-        fn input_cost_per_million(&self) -> f64 { 10.0 }
-        fn output_cost_per_million(&self) -> f64 { 30.0 }
+        fn input_cost_per_million(&self) -> f64 {
+            10.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            30.0
+        }
     }
 
     /// A mock model that always calls a tool (looping), used to test budget enforcement
@@ -1576,7 +1626,9 @@ mod tests {
     #[async_trait]
     impl Model for LoopingToolModel {
         async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-            let remaining = self.turns_before_done.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let remaining = self
+                .turns_before_done
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
             if remaining <= 1 {
                 // Final turn: emit text
@@ -1622,14 +1674,28 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "looping-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
+        fn name(&self) -> &str {
+            "looping-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
         // $10/M input, $30/M output
-        fn input_cost_per_million(&self) -> f64 { 10.0 }
-        fn output_cost_per_million(&self) -> f64 { 30.0 }
+        fn input_cost_per_million(&self) -> f64 {
+            10.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            30.0
+        }
     }
 
     #[tokio::test]
@@ -1765,11 +1831,17 @@ mod tests {
         let events: Vec<RunEvent> = stream.collect().await;
 
         // Should have an Aborted event with budget_exceeded
-        let has_budget_abort = events.iter().any(|e| matches!(
-            e,
-            RunEvent::Aborted { reason } if reason == "budget_exceeded"
-        ));
-        assert!(has_budget_abort, "Expected Aborted event with budget_exceeded, got: {:?}", events);
+        let has_budget_abort = events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::Aborted { reason } if reason == "budget_exceeded"
+            )
+        });
+        assert!(
+            has_budget_abort,
+            "Expected Aborted event with budget_exceeded, got: {:?}",
+            events
+        );
     }
 
     #[test]
@@ -1903,9 +1975,10 @@ mod tests {
     impl Model for MultiTurnModel {
         async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
             // If there are tool results, respond with final text
-            let has_tool_result = request.messages.iter().any(|m| {
-                matches!(m, Message::ToolResult { .. })
-            });
+            let has_tool_result = request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult { .. }));
 
             if has_tool_result {
                 let chunks = vec![
@@ -1954,13 +2027,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "multi-turn-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "multi-turn-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2077,19 +2164,16 @@ mod tests {
         let provider = make_provider(model);
 
         // First guardrail passes, second fails, third should never be checked
-        let g1: Arc<dyn crate::guardrail::InputGuardrail> =
-            Arc::new(PassingInputGuardrail {
-                guardrail_name: "first".to_string(),
-            });
-        let g2: Arc<dyn crate::guardrail::InputGuardrail> =
-            Arc::new(FailingInputGuardrail {
-                guardrail_name: "second".to_string(),
-                fail_reason: "blocked".to_string(),
-            });
-        let g3: Arc<dyn crate::guardrail::InputGuardrail> =
-            Arc::new(PassingInputGuardrail {
-                guardrail_name: "third".to_string(),
-            });
+        let g1: Arc<dyn crate::guardrail::InputGuardrail> = Arc::new(PassingInputGuardrail {
+            guardrail_name: "first".to_string(),
+        });
+        let g2: Arc<dyn crate::guardrail::InputGuardrail> = Arc::new(FailingInputGuardrail {
+            guardrail_name: "second".to_string(),
+            fail_reason: "blocked".to_string(),
+        });
+        let g3: Arc<dyn crate::guardrail::InputGuardrail> = Arc::new(PassingInputGuardrail {
+            guardrail_name: "third".to_string(),
+        });
 
         let agent = Agent::builder("multi-guard-agent")
             .input_guardrail(g1)
@@ -2165,11 +2249,13 @@ mod tests {
         let events: Vec<RunEvent> = stream.collect().await;
 
         // Should have a GuardrailTripped event
-        let has_guardrail_tripped = events.iter().any(|e| matches!(
-            e,
-            RunEvent::GuardrailTripped { name, reason }
-            if name == "stream_guard" && reason == "input blocked"
-        ));
+        let has_guardrail_tripped = events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::GuardrailTripped { name, reason }
+                if name == "stream_guard" && reason == "input blocked"
+            )
+        });
         assert!(
             has_guardrail_tripped,
             "Expected GuardrailTripped event, got: {:?}",
@@ -2202,11 +2288,13 @@ mod tests {
         let events: Vec<RunEvent> = stream.collect().await;
 
         // Should have a GuardrailTripped event for the output guardrail
-        let has_guardrail_tripped = events.iter().any(|e| matches!(
-            e,
-            RunEvent::GuardrailTripped { name, reason }
-            if name == "output_stream_guard" && reason == "output blocked"
-        ));
+        let has_guardrail_tripped = events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::GuardrailTripped { name, reason }
+                if name == "output_stream_guard" && reason == "output blocked"
+            )
+        });
         assert!(
             has_guardrail_tripped,
             "Expected GuardrailTripped event for output guardrail, got: {:?}",
@@ -2310,10 +2398,7 @@ mod tests {
             0,
         );
 
-        assert_eq!(
-            result,
-            NextStep::Continue
-        );
+        assert_eq!(result, NextStep::Continue);
     }
 
     #[test]
@@ -2325,10 +2410,18 @@ mod tests {
         struct ApprovalTool;
         #[async_trait]
         impl Tool for ApprovalTool {
-            fn name(&self) -> &str { "dangerous_tool" }
-            fn description(&self) -> &str { "needs approval" }
-            fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
-            fn concurrency(&self, _input: &serde_json::Value) -> Concurrency { Concurrency::Safe }
+            fn name(&self) -> &str {
+                "dangerous_tool"
+            }
+            fn description(&self) -> &str {
+                "needs approval"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
+                Concurrency::Safe
+            }
             async fn execute(
                 &self,
                 _input: serde_json::Value,
@@ -2675,16 +2768,24 @@ mod tests {
     #[async_trait]
     impl Model for PromptTooLongThenSuccessModel {
         async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 return Err(ModelError::PromptTooLong { tokens: 200000 });
             }
             // Second call succeeds
             let chunks = vec![
-                Ok(StreamChunk::TextDelta { text: "recovered!".to_string() }),
+                Ok(StreamChunk::TextDelta {
+                    text: "recovered!".to_string(),
+                }),
                 Ok(StreamChunk::MessageStop {
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage { input_tokens: 10, output_tokens: 5, cache_read_tokens: None },
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: None,
+                    },
                 }),
             ];
             Ok(Box::pin(futures::stream::iter(chunks)))
@@ -2694,13 +2795,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "prompt-too-long-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "prompt-too-long-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2711,7 +2826,9 @@ mod tests {
         let provider = make_provider(model);
         let agent = Agent::builder("recovery-agent").build();
         let config = RunConfig::builder(provider, "mock").build();
-        let input = Input::Fresh { prompt: "test".to_string() };
+        let input = Input::Fresh {
+            prompt: "test".to_string(),
+        };
 
         let result = run(&agent, input, &config).await.unwrap();
         assert_eq!(result.output, "recovered!");
@@ -2730,13 +2847,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "always-too-long" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "always-too-long"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2745,7 +2876,9 @@ mod tests {
         let provider = make_provider(model);
         let agent = Agent::builder("exhaust-agent").build();
         let config = RunConfig::builder(provider, "mock").build();
-        let input = Input::Fresh { prompt: "test".to_string() };
+        let input = Input::Fresh {
+            prompt: "test".to_string(),
+        };
 
         let result = run(&agent, input, &config).await;
         assert!(result.is_err());
@@ -2767,46 +2900,64 @@ mod tests {
     #[async_trait]
     impl Model for MaxOutputThenSuccessModel {
         async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 // First call: stream some text then error mid-stream with MaxOutputTokens
                 // Actually, MaxOutputTokens comes as a stop_reason=MaxTokens in the stream.
                 // So let's return a stream that ends with MaxTokens stop reason.
                 let chunks = vec![
-                    Ok(StreamChunk::TextDelta { text: "partial output".to_string() }),
+                    Ok(StreamChunk::TextDelta {
+                        text: "partial output".to_string(),
+                    }),
                     Ok(StreamChunk::MessageStop {
                         stop_reason: StopReason::MaxTokens,
-                        usage: Usage { input_tokens: 10, output_tokens: 4096, cache_read_tokens: None },
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 4096,
+                            cache_read_tokens: None,
+                        },
                     }),
                 ];
                 return Ok(Box::pin(futures::stream::iter(chunks)));
             }
             // Subsequent calls: check if there's a continuation prompt
-            let has_continuation = request.messages.iter().any(|m| {
-                match m {
-                    Message::User { content } => content.iter().any(|c| match c {
-                        ContentBlock::Text { text } => text.contains("continue"),
-                        _ => false,
-                    }),
+            let has_continuation = request.messages.iter().any(|m| match m {
+                Message::User { content } => content.iter().any(|c| match c {
+                    ContentBlock::Text { text } => text.contains("continue"),
                     _ => false,
-                }
+                }),
+                _ => false,
             });
             if has_continuation {
                 let chunks = vec![
-                    Ok(StreamChunk::TextDelta { text: " completed".to_string() }),
+                    Ok(StreamChunk::TextDelta {
+                        text: " completed".to_string(),
+                    }),
                     Ok(StreamChunk::MessageStop {
                         stop_reason: StopReason::EndTurn,
-                        usage: Usage { input_tokens: 20, output_tokens: 10, cache_read_tokens: None },
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            cache_read_tokens: None,
+                        },
                     }),
                 ];
                 return Ok(Box::pin(futures::stream::iter(chunks)));
             }
             // Shouldn't reach here
             let chunks = vec![
-                Ok(StreamChunk::TextDelta { text: "fallback".to_string() }),
+                Ok(StreamChunk::TextDelta {
+                    text: "fallback".to_string(),
+                }),
                 Ok(StreamChunk::MessageStop {
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage { input_tokens: 5, output_tokens: 5, cache_read_tokens: None },
+                    usage: Usage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        cache_read_tokens: None,
+                    },
                 }),
             ];
             Ok(Box::pin(futures::stream::iter(chunks)))
@@ -2816,13 +2967,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "max-output-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "max-output-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2833,7 +2998,9 @@ mod tests {
         let provider = make_provider(model);
         let agent = Agent::builder("max-tokens-agent").build();
         let config = RunConfig::builder(provider, "mock").build();
-        let input = Input::Fresh { prompt: "write something long".to_string() };
+        let input = Input::Fresh {
+            prompt: "write something long".to_string(),
+        };
 
         let result = run(&agent, input, &config).await.unwrap();
         // The recovery should have appended a continuation prompt and got the completion
@@ -2853,13 +3020,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "connection-error-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "connection-error-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2868,7 +3049,9 @@ mod tests {
         let provider = make_provider(model);
         let agent = Agent::builder("conn-error-agent").build();
         let config = RunConfig::builder(provider, "mock").build();
-        let input = Input::Fresh { prompt: "test".to_string() };
+        let input = Input::Fresh {
+            prompt: "test".to_string(),
+        };
 
         let result = run(&agent, input, &config).await;
         assert!(result.is_err());
@@ -2887,21 +3070,33 @@ mod tests {
     #[async_trait]
     impl Model for StreamInterruptedThenSuccessModel {
         async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 // First call: stream starts then errors
                 let chunks: Vec<Result<StreamChunk, ModelError>> = vec![
-                    Ok(StreamChunk::TextDelta { text: "partial".to_string() }),
-                    Err(ModelError::StreamInterrupted("connection reset".to_string())),
+                    Ok(StreamChunk::TextDelta {
+                        text: "partial".to_string(),
+                    }),
+                    Err(ModelError::StreamInterrupted(
+                        "connection reset".to_string(),
+                    )),
                 ];
                 return Ok(Box::pin(futures::stream::iter(chunks)));
             }
             // Recovery call succeeds
             let chunks = vec![
-                Ok(StreamChunk::TextDelta { text: "full response".to_string() }),
+                Ok(StreamChunk::TextDelta {
+                    text: "full response".to_string(),
+                }),
                 Ok(StreamChunk::MessageStop {
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage { input_tokens: 10, output_tokens: 5, cache_read_tokens: None },
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: None,
+                    },
                 }),
             ];
             Ok(Box::pin(futures::stream::iter(chunks)))
@@ -2911,13 +3106,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "stream-interrupted-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "stream-interrupted-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     #[tokio::test]
@@ -2928,7 +3137,9 @@ mod tests {
         let provider = make_provider(model);
         let agent = Agent::builder("stream-interrupted-agent").build();
         let config = RunConfig::builder(provider, "mock").build();
-        let input = Input::Fresh { prompt: "test".to_string() };
+        let input = Input::Fresh {
+            prompt: "test".to_string(),
+        };
 
         let result = run(&agent, input, &config).await.unwrap();
         assert_eq!(result.output, "full response");
@@ -2952,18 +3163,36 @@ mod tests {
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
             unimplemented!()
         }
-        fn name(&self) -> &str { "pricing-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { self.input_cost }
-        fn output_cost_per_million(&self) -> f64 { self.output_cost }
+        fn name(&self) -> &str {
+            "pricing-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            self.input_cost
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            self.output_cost
+        }
     }
 
     /// Strategy for generating a Usage value with reasonable token counts.
     fn arb_usage() -> impl Strategy<Value = Usage> {
-        (0u64..1_000_000, 0u64..1_000_000, proptest::option::of(0u64..500_000))
+        (
+            0u64..1_000_000,
+            0u64..1_000_000,
+            proptest::option::of(0u64..500_000),
+        )
             .prop_map(|(input_tokens, output_tokens, cache_read_tokens)| Usage {
                 input_tokens,
                 output_tokens,
@@ -3141,13 +3370,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "budget-prop-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { self.input_cost_per_m }
-        fn output_cost_per_million(&self) -> f64 { self.output_cost_per_m }
+        fn name(&self) -> &str {
+            "budget-prop-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            self.input_cost_per_m
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            self.output_cost_per_m
+        }
     }
 
     // ===================================================================
@@ -3166,9 +3409,10 @@ mod tests {
     impl Model for ApprovalToolModel {
         async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
             // If there are tool results in messages, respond with final text
-            let has_tool_result = request.messages.iter().any(|m| {
-                matches!(m, Message::ToolResult { .. })
-            });
+            let has_tool_result = request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult { .. }));
 
             if has_tool_result {
                 let chunks = vec![
@@ -3217,13 +3461,27 @@ mod tests {
             unimplemented!()
         }
 
-        fn name(&self) -> &str { "approval-tool-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 3.0 }
-        fn output_cost_per_million(&self) -> f64 { 15.0 }
+        fn name(&self) -> &str {
+            "approval-tool-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            3.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            15.0
+        }
     }
 
     /// A tool that always requires approval.
@@ -3231,8 +3489,12 @@ mod tests {
 
     #[async_trait]
     impl Tool for DangerousTool {
-        fn name(&self) -> &str { "dangerous_tool" }
-        fn description(&self) -> &str { "A tool that requires approval" }
+        fn name(&self) -> &str {
+            "dangerous_tool"
+        }
+        fn description(&self) -> &str {
+            "A tool that requires approval"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             json!({"type": "object", "properties": {"action": {"type": "string"}}})
         }
@@ -3256,11 +3518,12 @@ mod tests {
 
     #[async_trait]
     impl crate::config::ApprovalHandler for AllowAllHandler {
-        async fn request_approval(
-            &self,
-            context: &ApprovalContext,
-        ) -> Vec<ApprovalResponse> {
-            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+        async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
+            context
+                .pending
+                .iter()
+                .map(|_| ApprovalResponse::Allow)
+                .collect()
         }
     }
 
@@ -3269,11 +3532,12 @@ mod tests {
 
     #[async_trait]
     impl crate::config::ApprovalHandler for DenyAllHandler {
-        async fn request_approval(
-            &self,
-            context: &ApprovalContext,
-        ) -> Vec<ApprovalResponse> {
-            context.pending.iter().map(|_| ApprovalResponse::Deny).collect()
+        async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
+            context
+                .pending
+                .iter()
+                .map(|_| ApprovalResponse::Deny)
+                .collect()
         }
     }
 
@@ -3284,10 +3548,7 @@ mod tests {
 
     #[async_trait]
     impl crate::config::ApprovalHandler for AlwaysAllowHandler {
-        async fn request_approval(
-            &self,
-            context: &ApprovalContext,
-        ) -> Vec<ApprovalResponse> {
+        async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
             context
                 .pending
                 .iter()
@@ -3305,12 +3566,13 @@ mod tests {
 
     #[async_trait]
     impl crate::config::ApprovalHandler for CapturingApprovalHandler {
-        async fn request_approval(
-            &self,
-            context: &ApprovalContext,
-        ) -> Vec<ApprovalResponse> {
+        async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
             self.captured.lock().unwrap().push(context.clone());
-            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+            context
+                .pending
+                .iter()
+                .map(|_| ApprovalResponse::Allow)
+                .collect()
         }
     }
 
@@ -3322,12 +3584,9 @@ mod tests {
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
         let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(AllowAllHandler);
 
-        let agent = Agent::builder("approval-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("approval-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3350,12 +3609,9 @@ mod tests {
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
         let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllHandler);
 
-        let agent = Agent::builder("deny-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("deny-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3371,8 +3627,11 @@ mod tests {
 
         // Verify that the denial message was injected into the state
         let has_denial = result.state.messages.iter().any(|m| match m {
-            Message::ToolResult { content, is_error, .. } => {
-                *is_error && content.contains("Permission denied")
+            Message::ToolResult {
+                content, is_error, ..
+            } => {
+                *is_error
+                    && content.contains("Permission denied")
                     && content.contains("dangerous_tool")
             }
             _ => false,
@@ -3386,17 +3645,13 @@ mod tests {
         let model: Arc<dyn Model> = Arc::new(ApprovalToolModel);
         let provider = make_provider(model);
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
-        let handler: Arc<dyn crate::config::ApprovalHandler> =
-            Arc::new(AlwaysAllowHandler {
-                pattern: "dangerous_tool".to_string(),
-            });
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(AlwaysAllowHandler {
+            pattern: "dangerous_tool".to_string(),
+        });
 
-        let agent = Agent::builder("always-allow-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("always-allow-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3417,12 +3672,9 @@ mod tests {
         let provider = make_provider(model);
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
 
-        let agent = Agent::builder("no-handler-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("no-handler-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         // No approval_handler set → None
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
@@ -3435,7 +3687,10 @@ mod tests {
         // The run should return early with pending_approvals populated
         assert!(!result.state.pending_approvals.is_empty());
         assert_eq!(result.state.pending_approvals.len(), 1);
-        assert_eq!(result.state.pending_approvals[0].tool_name, "dangerous_tool");
+        assert_eq!(
+            result.state.pending_approvals[0].tool_name,
+            "dangerous_tool"
+        );
         // The run returns on the first turn without completing
         assert_eq!(result.turns, 0);
     }
@@ -3447,17 +3702,13 @@ mod tests {
         let provider = make_provider(model);
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
         let captured = Arc::new(std::sync::Mutex::new(Vec::<ApprovalContext>::new()));
-        let handler: Arc<dyn crate::config::ApprovalHandler> =
-            Arc::new(CapturingApprovalHandler {
-                captured: Arc::clone(&captured),
-            });
+        let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(CapturingApprovalHandler {
+            captured: Arc::clone(&captured),
+        });
 
-        let agent = Agent::builder("context-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("context-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3496,12 +3747,9 @@ mod tests {
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
         let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllApprovalHandler);
 
-        let agent = Agent::builder("non-interactive-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("non-interactive-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3526,8 +3774,11 @@ mod tests {
 
         // Verify that a denial ToolResult was injected into the conversation
         let has_denial = result.state.messages.iter().any(|m| match m {
-            Message::ToolResult { content, is_error, .. } => {
-                *is_error && content.contains("Permission denied")
+            Message::ToolResult {
+                content, is_error, ..
+            } => {
+                *is_error
+                    && content.contains("Permission denied")
                     && content.contains("dangerous_tool")
             }
             _ => false,
@@ -3549,12 +3800,9 @@ mod tests {
         let tool: Arc<dyn Tool> = Arc::new(DangerousTool);
         let handler: Arc<dyn crate::config::ApprovalHandler> = Arc::new(DenyAllApprovalHandler);
 
-        let agent = Agent::builder("continuation-agent")
-            .tool(tool)
-            .build();
-        let permissions = crate::permission::PermissionEngine::new(
-            crate::permission::PermissionMode::Normal,
-        );
+        let agent = Agent::builder("continuation-agent").tool(tool).build();
+        let permissions =
+            crate::permission::PermissionEngine::new(crate::permission::PermissionMode::Normal);
         let config = RunConfig::builder(provider, "mock")
             .permissions(permissions)
             .approval_handler(handler)
@@ -3571,4 +3819,3 @@ mod tests {
         assert!(!result.output.is_empty());
     }
 }
-

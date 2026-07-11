@@ -59,7 +59,10 @@ impl ProfilesSection {
             None => return Self::default(),
         };
 
-        let default = obj.get("default").and_then(|v| v.as_str()).map(String::from);
+        let default = obj
+            .get("default")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let mut profiles = HashMap::new();
         for (key, val) in obj {
@@ -226,7 +229,7 @@ mod tests {
             Just(serde_json::Value::Null),
             any::<bool>().prop_map(serde_json::Value::Bool),
             any::<i64>().prop_map(|n| serde_json::Value::Number(serde_json::Number::from(n))),
-            "[a-zA-Z0-9 _-]{0,30}".prop_map(|s| serde_json::Value::String(s)),
+            "[a-zA-Z0-9 _-]{0,30}".prop_map(serde_json::Value::String),
         ];
 
         leaf.prop_recursive(
@@ -235,8 +238,7 @@ mod tests {
             5,  // items per collection
             |inner| {
                 prop_oneof![
-                    prop::collection::vec(inner.clone(), 0..3)
-                        .prop_map(serde_json::Value::Array),
+                    prop::collection::vec(inner.clone(), 0..3).prop_map(serde_json::Value::Array),
                     prop::collection::hash_map("[a-zA-Z_][a-zA-Z0-9_]{0,8}", inner, 0..3)
                         .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
                 ]
@@ -247,17 +249,13 @@ mod tests {
     /// Strategy for generating arbitrary ProfileConfig values.
     fn arb_profile_config() -> impl Strategy<Value = ProfileConfig> {
         (
-            proptest::option::of("[a-zA-Z][a-zA-Z0-9_-]{0,15}"),        // provider
-            proptest::option::of("[a-zA-Z0-9_-]{1,30}"),                 // api_key
+            proptest::option::of("[a-zA-Z][a-zA-Z0-9_-]{0,15}"), // provider
+            proptest::option::of("[a-zA-Z0-9_-]{1,30}"),         // api_key
             proptest::option::of("https?://[a-z0-9.-]{1,20}(:[0-9]{2,5})?(/[a-z0-9_-]{0,10})*"), // base_url
-            proptest::option::of("[a-zA-Z][a-zA-Z0-9._-]{0,30}"),       // model
-            proptest::option::of(1usize..1_000_000),                     // context_window
-            proptest::option::of(1usize..100_000),                       // max_output_tokens
-            prop::collection::hash_map(
-                "[a-zA-Z_][a-zA-Z0-9_]{0,10}",
-                arb_json_value(),
-                0..3,
-            ), // extra
+            proptest::option::of("[a-zA-Z][a-zA-Z0-9._-]{0,30}"), // model
+            proptest::option::of(1usize..1_000_000),              // context_window
+            proptest::option::of(1usize..100_000),                // max_output_tokens
+            prop::collection::hash_map("[a-zA-Z_][a-zA-Z0-9_]{0,10}", arb_json_value(), 0..3), // extra
         )
             .prop_map(
                 |(provider, api_key, base_url, model, context_window, max_output_tokens, extra)| {

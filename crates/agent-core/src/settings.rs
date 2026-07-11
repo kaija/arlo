@@ -246,19 +246,17 @@ impl PolicyMerger {
         // Process runtime level (highest precedence)
         let runtime_allow_patterns: Vec<ToolPattern> = runtime_allow
             .iter()
-            .map(|s| {
-                ToolPattern::parse(s)
-                    .unwrap_or_else(|| ToolPattern::Bare(s.clone()))
-            })
+            .map(|s| ToolPattern::parse(s).unwrap_or_else(|| ToolPattern::Bare(s.clone())))
             .collect();
         let runtime_deny_patterns: Vec<ToolPattern> = runtime_deny
             .iter()
-            .map(|s| {
-                ToolPattern::parse(s)
-                    .unwrap_or_else(|| ToolPattern::Bare(s.clone()))
-            })
+            .map(|s| ToolPattern::parse(s).unwrap_or_else(|| ToolPattern::Bare(s.clone())))
             .collect();
-        Self::apply_level(&mut decisions, &runtime_allow_patterns, &runtime_deny_patterns);
+        Self::apply_level(
+            &mut decisions,
+            &runtime_allow_patterns,
+            &runtime_deny_patterns,
+        );
 
         // Separate into allow and deny lists
         let mut allow = Vec::new();
@@ -474,7 +472,10 @@ mod tests {
     fn project_path_returns_correct_path() {
         let working_dir = Path::new("/home/user/project");
         let path = SettingsLoader::project_path(working_dir);
-        assert_eq!(path, PathBuf::from("/home/user/project/.arlo/settings.json"));
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/project/.arlo/settings.json")
+        );
     }
 
     #[test]
@@ -671,12 +672,7 @@ mod tests {
         let project = SettingsFile::default();
 
         // "Bash(unclosed" won't parse, but the fallback makes it Bare
-        let result = PolicyMerger::merge(
-            &user,
-            &project,
-            &["Bash(unclosed".to_string()],
-            &[],
-        );
+        let result = PolicyMerger::merge(&user, &project, &["Bash(unclosed".to_string()], &[]);
 
         assert_eq!(result.allow.len(), 1);
         assert_eq!(
@@ -734,12 +730,7 @@ mod tests {
             deny: vec![ToolPattern::Bare("read_file".to_string())],
         };
 
-        let result = PolicyMerger::merge(
-            &user,
-            &project,
-            &["read_file".to_string()],
-            &[],
-        );
+        let result = PolicyMerger::merge(&user, &project, &["read_file".to_string()], &[]);
 
         let allow_strings: Vec<String> = result.allow.iter().map(|p| p.to_string()).collect();
         let deny_strings: Vec<String> = result.deny.iter().map(|p| p.to_string()).collect();
@@ -822,17 +813,13 @@ mod tests {
 
         /// Strategy for compound patterns like `"Name(arg*)"`.
         fn compound_pattern_strategy() -> impl Strategy<Value = String> {
-            ("[A-Z][a-z]{1,8}", "[a-z0-9/*]{1,10}").prop_map(|(name, arg)| {
-                format!("{}({})", name, arg)
-            })
+            ("[A-Z][a-z]{1,8}", "[a-z0-9/*]{1,10}")
+                .prop_map(|(name, arg)| format!("{}({})", name, arg))
         }
 
         /// Strategy for valid tool pattern strings (either bare or compound).
         fn valid_pattern_strategy() -> impl Strategy<Value = String> {
-            prop_oneof![
-                bare_pattern_strategy(),
-                compound_pattern_strategy(),
-            ]
+            prop_oneof![bare_pattern_strategy(), compound_pattern_strategy(),]
         }
 
         // ===================================================================
@@ -1313,10 +1300,10 @@ mod tests {
         /// Strategy for generating a valid profiles JSON object.
         fn profiles_json_strategy() -> impl Strategy<Value = serde_json::Value> {
             (
-                proptest::option::of("[a-z]{3,8}"),   // default profile name
+                proptest::option::of("[a-z]{3,8}"), // default profile name
                 proptest::collection::vec(
                     (
-                        "[a-z]{3,8}",                // profile name
+                        "[a-z]{3,8}", // profile name
                         proptest::option::of(prop_oneof![
                             Just("openai".to_string()),
                             Just("anthropic".to_string()),
@@ -1348,10 +1335,7 @@ mod tests {
                         if let Some(m) = model {
                             profile_obj.insert("model".to_string(), serde_json::json!(m));
                         }
-                        obj.insert(
-                            name.clone(),
-                            serde_json::Value::Object(profile_obj),
-                        );
+                        obj.insert(name.clone(), serde_json::Value::Object(profile_obj));
                     }
                     serde_json::Value::Object(obj)
                 })
@@ -1376,8 +1360,6 @@ mod tests {
                 profiles_a in profiles_json_strategy(),
                 profiles_b in profiles_json_strategy(),
             ) {
-                use crate::profile::ProfilesSection;
-
                 let tmp = tempfile::TempDir::new().unwrap();
 
                 // --- Test 1: Changing profiles does NOT affect permissions ---
@@ -1435,9 +1417,9 @@ mod tests {
 
                 // Profiles should be identical regardless of permissions content
                 let profiles_from_1 = result_1.profiles.clone()
-                    .unwrap_or_else(ProfilesSection::default);
+                    .unwrap_or_default();
                 let profiles_from_3 = result_3.profiles.clone()
-                    .unwrap_or_else(ProfilesSection::default);
+                    .unwrap_or_default();
 
                 prop_assert_eq!(
                     profiles_from_1.default,

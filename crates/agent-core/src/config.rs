@@ -78,7 +78,11 @@ impl ApprovalHandler for DenyAllApprovalHandler {
                 "Tool call denied: no interactive approval handler available"
             );
         }
-        context.pending.iter().map(|_| ApprovalResponse::Deny).collect()
+        context
+            .pending
+            .iter()
+            .map(|_| ApprovalResponse::Deny)
+            .collect()
     }
 }
 
@@ -295,7 +299,7 @@ pub enum Input {
     /// Provide specific messages as the conversation history.
     Items { messages: Vec<Message> },
     /// Resume a run from a previously serialized state.
-    Resume { state: RunState },
+    Resume { state: Box<RunState> },
 }
 
 /// The result of a completed agent run.
@@ -329,10 +333,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for MockProvider {
-        async fn resolve(
-            &self,
-            _model_name: &str,
-        ) -> Result<Arc<dyn Model>, ModelError> {
+        async fn resolve(&self, _model_name: &str) -> Result<Arc<dyn Model>, ModelError> {
             Err(ModelError::Connection("mock provider".to_string()))
         }
 
@@ -348,7 +349,11 @@ mod tests {
     impl ApprovalHandler for MockApprovalHandler {
         async fn request_approval(&self, context: &ApprovalContext) -> Vec<ApprovalResponse> {
             // Approve everything
-            context.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+            context
+                .pending
+                .iter()
+                .map(|_| ApprovalResponse::Allow)
+                .collect()
         }
     }
 
@@ -469,7 +474,9 @@ mod tests {
     fn input_resume_variant() {
         use crate::state::RunState;
         let state = RunState::new("run-1".to_string(), None, None);
-        let input = Input::Resume { state };
+        let input = Input::Resume {
+            state: Box::new(state),
+        };
         let cloned = input.clone();
         let debug = format!("{:?}", cloned);
         assert!(debug.contains("Resume"));
@@ -624,7 +631,10 @@ mod tests {
                 .temperature(f32::INFINITY)
                 .build()
         }));
-        assert!(result.is_err(), "Positive infinity temperature should be rejected");
+        assert!(
+            result.is_err(),
+            "Positive infinity temperature should be rejected"
+        );
     }
 
     #[test]
@@ -635,7 +645,10 @@ mod tests {
                 .temperature(f32::NEG_INFINITY)
                 .build()
         }));
-        assert!(result.is_err(), "Negative infinity temperature should be rejected");
+        assert!(
+            result.is_err(),
+            "Negative infinity temperature should be rejected"
+        );
     }
 
     // ===================================================================
@@ -654,24 +667,28 @@ mod tests {
 
         // In Normal mode with no static rules, a tool with Never approval requirement
         // should be allowed (falls through to Layer 4 which allows Never).
-        let decision = config.permissions.check(
-            "any_tool",
-            &crate::tool::ApprovalRequirement::Never,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("any_tool", &crate::tool::ApprovalRequirement::Never, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "Without load_settings, tools should pass through (no static deny rules)"
         );
 
         // A tool that requires approval should get NeedsApproval (not statically denied/allowed).
-        let decision = config.permissions.check(
-            "some_tool",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("some_tool", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::NeedsApproval { .. }
+            ),
             "Without load_settings, no static allow rules → falls through to approval requirement"
         );
     }
@@ -688,13 +705,15 @@ mod tests {
             .build();
 
         // Same behavior as no load_settings call — empty static rules.
-        let decision = config.permissions.check(
-            "any_tool",
-            &crate::tool::ApprovalRequirement::Never,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("any_tool", &crate::tool::ApprovalRequirement::Never, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "Missing settings files should result in empty policy (no static deny rules)"
         );
 
@@ -704,7 +723,10 @@ mod tests {
             None,
         );
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::NeedsApproval { .. }
+            ),
             "Missing settings files should not add any static allow rules"
         );
     }
@@ -727,33 +749,34 @@ mod tests {
         )
         .unwrap();
 
-        let config = RunConfig::builder(
-            mock_provider(),
-            "test-model",
-        )
-        .permissions(PermissionEngine::new(PermissionMode::Normal))
-        .load_settings(tmp.path())
-        .build();
+        let config = RunConfig::builder(mock_provider(), "test-model")
+            .permissions(PermissionEngine::new(PermissionMode::Normal))
+            .load_settings(tmp.path())
+            .build();
 
         // read_file should be statically allowed (matches bare pattern "read_file")
-        let decision = config.permissions.check(
-            "read_file",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("read_file", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "read_file should be statically allowed from settings"
         );
 
         // fs_write should be statically allowed (matches glob "fs_*")
-        let decision = config.permissions.check(
-            "fs_write",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("fs_write", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "fs_write should match 'fs_*' allow pattern from settings"
         );
 
@@ -775,7 +798,10 @@ mod tests {
             None,
         );
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::NeedsApproval { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::NeedsApproval { .. }
+            ),
             "Tools not in allow/deny should fall through to approval requirement"
         );
     }
@@ -799,22 +825,21 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = RunConfig::builder(
-            mock_provider(),
-            "test-model",
-        )
-        .permissions(PermissionEngine::new(PermissionMode::Normal))
-        .load_settings(tmp.path())
-        .build();
+        let mut config = RunConfig::builder(mock_provider(), "test-model")
+            .permissions(PermissionEngine::new(PermissionMode::Normal))
+            .load_settings(tmp.path())
+            .build();
 
         // Initially, read_file is allowed from settings
-        let decision = config.permissions.check(
-            "read_file",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("read_file", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "read_file should be allowed from settings initially"
         );
 
@@ -822,24 +847,25 @@ mod tests {
         config.permissions.add_static_deny("read_file");
 
         // Deny should take precedence since it's checked first in Layer 2
-        let decision = config.permissions.check(
-            "read_file",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("read_file", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
             matches!(decision, crate::permission::PermissionDecision::Deny { .. }),
             "Runtime add_static_deny should override settings allow (deny checked first)"
         );
 
         // fs_write should still be allowed (not overridden)
-        let decision = config.permissions.check(
-            "fs_write",
-            &crate::tool::ApprovalRequirement::Always,
-            None,
-        );
+        let decision =
+            config
+                .permissions
+                .check("fs_write", &crate::tool::ApprovalRequirement::Always, None);
         assert!(
-            matches!(decision, crate::permission::PermissionDecision::Allow { .. }),
+            matches!(
+                decision,
+                crate::permission::PermissionDecision::Allow { .. }
+            ),
             "fs_write should still match 'fs_*' allow (not overridden by runtime)"
         );
     }
@@ -927,7 +953,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "DenyAllApprovalHandler should return immediately without blocking");
+        assert!(
+            result.is_ok(),
+            "DenyAllApprovalHandler should return immediately without blocking"
+        );
         let responses = result.unwrap();
         assert_eq!(responses, vec![ApprovalResponse::Deny]);
     }

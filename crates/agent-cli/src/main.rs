@@ -18,13 +18,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use agent_core::{
-    run, Agent, ConfigError, ConfigInputs, ConfigResolver, DenyAllApprovalHandler,
-    FsSessionStore, InMemoryTaskStore, Input, Instructions, Message, Model, ModelError,
-    ModelProvider, PermissionEngine, PermissionMode, RunConfig, SessionStore, SkillRegistry,
-    SkillTool, SubAgentDef, SubAgentTool, TaskStore, TodoListTool, Tool,
+    run, Agent, ConfigError, ConfigInputs, ConfigResolver, DenyAllApprovalHandler, FsSessionStore,
+    InMemoryTaskStore, Input, Instructions, Message, Model, ModelError, ModelProvider,
+    PermissionEngine, PermissionMode, RunConfig, SessionStore, SkillRegistry, SkillTool,
+    SubAgentDef, SubAgentTool, TaskStore, TodoListTool, Tool,
 };
 use agent_llm::{ModelOverrideWrapper, UnifiedProvider};
-use agent_tools::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool, WebFetchTool, WebSearchTool, BraveSearchProvider};
+use agent_tools::{
+    BraveSearchProvider, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool,
+    WebFetchTool, WebSearchTool,
+};
 
 /// A wrapping `ModelProvider` that applies `ModelOverrideWrapper` after resolving a model.
 ///
@@ -165,7 +168,9 @@ fn print_usage() {
     eprintln!("An autonomous coding agent powered by LLMs.");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --model <MODEL>   Model name (e.g., openai:gpt-4, anthropic:claude-sonnet-4-20250514)");
+    eprintln!(
+        "  --model <MODEL>   Model name (e.g., openai:gpt-4, anthropic:claude-sonnet-4-20250514)"
+    );
     eprintln!("  --profile <NAME>  Use a named provider profile from settings");
     eprintln!("  --dump-prompt     Print the full system prompt (instructions + tool definitions) and exit");
     eprintln!("  --skip-permissions");
@@ -200,9 +205,9 @@ fn default_tools() -> Vec<Arc<dyn Tool>> {
     // Register WebSearchTool only if Brave API key is available
     if let Ok(api_key) = std::env::var("BRAVE_API_KEY") {
         if !api_key.is_empty() {
-            tools.push(Arc::new(WebSearchTool::new(
-                Box::new(BraveSearchProvider::new(api_key)),
-            )));
+            tools.push(Arc::new(WebSearchTool::new(Box::new(
+                BraveSearchProvider::new(api_key),
+            ))));
         }
     }
 
@@ -241,10 +246,7 @@ fn load_skills() -> (SkillRegistry, Vec<Arc<dyn Tool>>) {
     let project_dir = project_skills_dir();
     let user_dir = user_skills_dir();
 
-    let registry = SkillRegistry::load(
-        project_dir.as_deref(),
-        user_dir.as_deref(),
-    );
+    let registry = SkillRegistry::load(project_dir.as_deref(), user_dir.as_deref());
 
     let skill_tools: Vec<Arc<dyn Tool>> = registry
         .skills()
@@ -316,7 +318,10 @@ fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
 
     // --- Tool Definitions ---
     let enabled_tools: Vec<&Arc<dyn Tool>> = tools.iter().filter(|t| t.is_enabled()).collect();
-    println!("┌─── Tool Definitions ({} tools) ─────────────────────────────────", enabled_tools.len());
+    println!(
+        "┌─── Tool Definitions ({} tools) ─────────────────────────────────",
+        enabled_tools.len()
+    );
 
     let mut total_schema_bytes: usize = 0;
     for tool in &enabled_tools {
@@ -344,10 +349,19 @@ fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
     let est_total = est_instruction_tokens + est_schema_tokens;
 
     println!("┌─── Estimated Token Usage ─────────────────────────────────────────");
-    println!("│ Instructions:  ~{:>6} chars  (~{} tokens)", instructions_chars, est_instruction_tokens);
-    println!("│ Tool schemas:  ~{:>6} chars  (~{} tokens)", total_schema_bytes, est_schema_tokens);
+    println!(
+        "│ Instructions:  ~{:>6} chars  (~{} tokens)",
+        instructions_chars, est_instruction_tokens
+    );
+    println!(
+        "│ Tool schemas:  ~{:>6} chars  (~{} tokens)",
+        total_schema_bytes, est_schema_tokens
+    );
     println!("│ ─────────────────────────────────────");
-    println!("│ Total estimate: ~{} tokens (before model-specific tokenization)", est_total);
+    println!(
+        "│ Total estimate: ~{} tokens (before model-specific tokenization)",
+        est_total
+    );
     println!("└────────────────────────────────────────────────────────────────────");
 }
 
@@ -489,84 +503,85 @@ async fn main() {
         working_dir: cwd.clone(),
     };
 
-    let (provider, model): (Arc<dyn ModelProvider>, String) =
-        match ConfigResolver::resolve(&config_inputs) {
-            Ok(Some(resolved)) => {
-                // Profile resolved successfully — construct provider from profile
-                let p = match UnifiedProvider::from_profile(&resolved) {
-                    Ok(p) => Arc::new(p),
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        process::exit(1);
-                    }
+    let (provider, model): (Arc<dyn ModelProvider>, String) = match ConfigResolver::resolve(
+        &config_inputs,
+    ) {
+        Ok(Some(resolved)) => {
+            // Profile resolved successfully — construct provider from profile
+            let p = match UnifiedProvider::from_profile(&resolved) {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    process::exit(1);
+                }
+            };
+            let m = resolved.model.clone();
+            // Wrap with OverridingProvider if context_window or max_output_tokens are set
+            let provider: Arc<dyn ModelProvider> =
+                if resolved.context_window.is_some() || resolved.max_output_tokens.is_some() {
+                    Arc::new(OverridingProvider {
+                        inner: p,
+                        context_window: resolved.context_window,
+                        max_output_tokens: resolved.max_output_tokens,
+                    })
+                } else {
+                    p
                 };
-                let m = resolved.model.clone();
-                // Wrap with OverridingProvider if context_window or max_output_tokens are set
-                let provider: Arc<dyn ModelProvider> =
-                    if resolved.context_window.is_some() || resolved.max_output_tokens.is_some() {
-                        Arc::new(OverridingProvider {
-                            inner: p,
-                            context_window: resolved.context_window,
-                            max_output_tokens: resolved.max_output_tokens,
-                        })
-                    } else {
-                        p
-                    };
-                (provider, m)
-            }
-            Ok(None) => {
-                // No profiles configured — fall back to existing env-based behavior
-                match UnifiedProvider::from_env() {
-                    Ok(p) => {
-                        let p = Arc::new(p);
-                        let m = resolve_model_name(cli.model, &p);
-                        (p as Arc<dyn ModelProvider>, m)
-                    }
-                    Err(e) => {
-                        if cli.dump_prompt {
-                            // For dump-prompt, provider isn't strictly necessary but we
-                            // still want to show the model resolution if possible.
-                            eprintln!("warning: {}", e);
-                            eprintln!();
-
-                            // Load skills and tools anyway for the dump
-                            let (skill_registry, skill_tools) = load_skills();
-                            let mut tools = default_tools();
-                            tools.extend(skill_tools);
-
-                            let skill_prompt = skill_registry.system_prompt_section();
-                            let instructions = if skill_prompt.is_empty() {
-                                Instructions::Static(
-                                    "(core prompt omitted in no-provider mode)".to_string(),
-                                )
-                            } else {
-                                Instructions::Static(skill_prompt)
-                            };
-
-                            dump_prompt(&instructions, &tools);
-                            process::exit(0);
-                        }
-                        eprintln!("error: {}", e);
+            (provider, m)
+        }
+        Ok(None) => {
+            // No profiles configured — fall back to existing env-based behavior
+            match UnifiedProvider::from_env() {
+                Ok(p) => {
+                    let p = Arc::new(p);
+                    let m = resolve_model_name(cli.model, &p);
+                    (p as Arc<dyn ModelProvider>, m)
+                }
+                Err(e) => {
+                    if cli.dump_prompt {
+                        // For dump-prompt, provider isn't strictly necessary but we
+                        // still want to show the model resolution if possible.
+                        eprintln!("warning: {}", e);
                         eprintln!();
-                        eprintln!(
-                            "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST"
-                        );
-                        process::exit(1);
+
+                        // Load skills and tools anyway for the dump
+                        let (skill_registry, skill_tools) = load_skills();
+                        let mut tools = default_tools();
+                        tools.extend(skill_tools);
+
+                        let skill_prompt = skill_registry.system_prompt_section();
+                        let instructions = if skill_prompt.is_empty() {
+                            Instructions::Static(
+                                "(core prompt omitted in no-provider mode)".to_string(),
+                            )
+                        } else {
+                            Instructions::Static(skill_prompt)
+                        };
+
+                        dump_prompt(&instructions, &tools);
+                        process::exit(0);
                     }
+                    eprintln!("error: {}", e);
+                    eprintln!();
+                    eprintln!(
+                        "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST"
+                    );
+                    process::exit(1);
                 }
             }
-            Err(ConfigError::UnknownProfile { name }) => {
-                eprintln!("error: unknown profile '{}'", name);
-                process::exit(1);
-            }
-            Err(ConfigError::MissingCredentials { provider, profile }) => {
-                eprintln!(
+        }
+        Err(ConfigError::UnknownProfile { name }) => {
+            eprintln!("error: unknown profile '{}'", name);
+            process::exit(1);
+        }
+        Err(ConfigError::MissingCredentials { provider, profile }) => {
+            eprintln!(
                     "error: profile '{}' requires API key for '{}' (set env var or add api_key to profile)",
                     profile, provider
                 );
-                process::exit(1);
-            }
-        };
+            process::exit(1);
+        }
+    };
 
     // Load skills from .arlo/skills/ directories
     let (skill_registry, skill_tools) = load_skills();
@@ -602,7 +617,8 @@ async fn main() {
             tool_description: Some(
                 "Spawn a background sub-agent to handle a delegated task. The sub-agent runs \
                  independently with access to shell, file, and search tools. Its progress is \
-                 tracked and you'll be notified when it completes.".to_string()
+                 tracked and you'll be notified when it completes."
+                    .to_string(),
             ),
             input_schema: None,
             max_turns: Some(15),
@@ -738,7 +754,6 @@ Additional tool guidance:
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

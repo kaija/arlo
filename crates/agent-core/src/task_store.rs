@@ -226,11 +226,7 @@ pub trait TaskStore: Send + Sync {
     async fn get_todo(&self, id: &str) -> Result<TodoItem, TaskStoreError>;
 
     /// Update a TodoItem's status.
-    async fn update_todo_status(
-        &self,
-        id: &str,
-        status: TodoStatus,
-    ) -> Result<(), TaskStoreError>;
+    async fn update_todo_status(&self, id: &str, status: TodoStatus) -> Result<(), TaskStoreError>;
 
     /// Remove a TodoItem by ID.
     async fn remove_todo(&self, id: &str) -> Result<(), TaskStoreError>;
@@ -241,7 +237,6 @@ pub trait TaskStore: Send + Sync {
     /// List all TodoItems in insertion order.
     async fn list_todos(&self) -> Result<Vec<TodoItem>, TaskStoreError>;
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -275,16 +270,15 @@ mod tests {
     /// Generate a SystemTime within a reasonable range (year 2000 to 2100).
     fn system_time_strategy() -> impl Strategy<Value = SystemTime> {
         // Seconds from UNIX_EPOCH: year 2000 (~946684800) to year 2100 (~4102444800)
-        (946_684_800u64..4_102_444_800u64).prop_map(|secs| {
-            std::time::UNIX_EPOCH + Duration::from_secs(secs)
-        })
+        (946_684_800u64..4_102_444_800u64)
+            .prop_map(|secs| std::time::UNIX_EPOCH + Duration::from_secs(secs))
     }
 
     /// Generate a finite f64 suitable for JSON round-trip (no NaN, no Infinity).
     /// We limit to integer cents (divide by 100) to avoid floating-point precision
     /// issues that arise when large f64 values don't round-trip through decimal JSON.
     fn finite_f64_strategy() -> impl Strategy<Value = f64> {
-        (-1_000_000_00i64..1_000_000_00i64).prop_map(|cents| cents as f64 / 100.0)
+        (-100_000_000_i64..100_000_000_i64).prop_map(|cents| cents as f64 / 100.0)
     }
 
     fn task_usage_strategy() -> impl Strategy<Value = TaskUsage> {
@@ -313,11 +307,26 @@ mod tests {
                 0..4,
             ),
         );
-        let part2 = (0u32..10, 0u32..10, proptest::option::of(".*"), any::<bool>());
+        let part2 = (
+            0u32..10,
+            0u32..10,
+            proptest::option::of(".*"),
+            any::<bool>(),
+        );
 
         (part1, part2).prop_map(
             |(
-                (id, status, description, task_type, created_at, completed_at, output, usage, dependencies),
+                (
+                    id,
+                    status,
+                    description,
+                    task_type,
+                    created_at,
+                    completed_at,
+                    output,
+                    usage,
+                    dependencies,
+                ),
                 (max_retries, retry_count, last_error, acknowledged),
             )| {
                 TaskEntry {
@@ -396,18 +405,15 @@ mod tests {
     fn task_store_error_strategy() -> impl Strategy<Value = TaskStoreError> {
         prop_oneof![
             "[a-zA-Z0-9_-]{1,50}".prop_map(|id| TaskStoreError::NotFound { id }),
-            (task_status_strategy(), task_status_strategy()).prop_map(|(from, to)| {
-                TaskStoreError::InvalidTransition { from, to }
-            }),
-            ("[a-zA-Z0-9_-]{1,50}", task_status_strategy()).prop_map(
-                |(dependency_id, status)| TaskStoreError::DependencyFailed {
+            (task_status_strategy(), task_status_strategy())
+                .prop_map(|(from, to)| { TaskStoreError::InvalidTransition { from, to } }),
+            ("[a-zA-Z0-9_-]{1,50}", task_status_strategy()).prop_map(|(dependency_id, status)| {
+                TaskStoreError::DependencyFailed {
                     dependency_id,
                     status,
                 }
-            ),
-            "[a-zA-Z0-9 _.,!-]{1,100}".prop_map(|message| TaskStoreError::StorageError {
-                message,
             }),
+            "[a-zA-Z0-9 _.,!-]{1,100}".prop_map(|message| TaskStoreError::StorageError { message }),
         ]
     }
 

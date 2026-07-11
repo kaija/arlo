@@ -59,8 +59,9 @@ pub async fn run_tui_repl(
     // Create approval channels for the InteractiveApprovalHandler
     let (approval_req_tx, mut approval_req_rx) = mpsc::channel::<approval::ApprovalRequest>(1);
     let (approval_resp_tx, approval_resp_rx) = mpsc::channel::<Vec<ApprovalResponse>>(1);
-    let approval_handler: Arc<dyn agent_core::ApprovalHandler> =
-        Arc::new(InteractiveApprovalHandler::new(approval_req_tx, approval_resp_rx));
+    let approval_handler: Arc<dyn agent_core::ApprovalHandler> = Arc::new(
+        InteractiveApprovalHandler::new(approval_req_tx, approval_resp_rx),
+    );
 
     // Initialize application state with permission engine
     let permissions = PermissionEngine::new(permission_mode);
@@ -145,8 +146,7 @@ pub async fn run_tui_repl(
                 state.spinner_tick = 0;
 
                 // Build agent
-                let mut builder = Agent::builder("arlo")
-                    .instructions(instructions.clone());
+                let mut builder = Agent::builder("arlo").instructions(instructions.clone());
                 for tool in &tools {
                     builder = builder.tool(tool.clone());
                 }
@@ -192,8 +192,7 @@ pub async fn run_tui_repl(
                 state.pending_approvals.clear();
 
                 // Build agent
-                let mut builder = Agent::builder("arlo")
-                    .instructions(instructions.clone());
+                let mut builder = Agent::builder("arlo").instructions(instructions.clone());
                 for tool in &tools {
                     builder = builder.tool(tool.clone());
                 }

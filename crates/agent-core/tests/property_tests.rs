@@ -10,11 +10,10 @@
 //! Validates: Requirements 7.5
 
 use proptest::prelude::*;
-use serde_json;
 
 use agent_core::{
-    CompactionState, ContentBlock, Message, PendingApproval, RunError, RunState, StreamChunk,
-    StopReason, ToolUseBlock, Usage, SCHEMA_VERSION,
+    CompactionState, ContentBlock, Message, PendingApproval, RunError, RunState, StopReason,
+    StreamChunk, ToolUseBlock, Usage, SCHEMA_VERSION,
 };
 
 // --- Arbitrary strategy implementations ---
@@ -26,7 +25,7 @@ fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
         any::<bool>().prop_map(serde_json::Value::Bool),
         // Use finite f64 values only to avoid NaN/Infinity which don't round-trip in JSON
         any::<i64>().prop_map(|n| serde_json::Value::Number(serde_json::Number::from(n))),
-        "[a-zA-Z0-9 _-]{0,50}".prop_map(|s| serde_json::Value::String(s)),
+        "[a-zA-Z0-9 _-]{0,50}".prop_map(serde_json::Value::String),
     ];
 
     leaf.prop_recursive(
@@ -35,12 +34,9 @@ fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
         10, // items per collection
         |inner| {
             prop_oneof![
-                prop::collection::vec(inner.clone(), 0..5)
-                    .prop_map(serde_json::Value::Array),
+                prop::collection::vec(inner.clone(), 0..5).prop_map(serde_json::Value::Array),
                 prop::collection::hash_map("[a-zA-Z_][a-zA-Z0-9_]{0,10}", inner, 0..5)
-                    .prop_map(|m| serde_json::Value::Object(
-                        m.into_iter().collect()
-                    )),
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
             ]
         },
     )
@@ -48,21 +44,24 @@ fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
 
 /// Strategy for generating arbitrary Usage values.
 fn arb_usage() -> impl Strategy<Value = Usage> {
-    (any::<u64>(), any::<u64>(), proptest::option::of(any::<u64>())).prop_map(
-        |(input_tokens, output_tokens, cache_read_tokens)| Usage {
+    (
+        any::<u64>(),
+        any::<u64>(),
+        proptest::option::of(any::<u64>()),
+    )
+        .prop_map(|(input_tokens, output_tokens, cache_read_tokens)| Usage {
             input_tokens,
             output_tokens,
             cache_read_tokens,
-        },
-    )
+        })
 }
 
 /// Strategy for generating arbitrary ToolUseBlock values.
 fn arb_tool_use_block() -> impl Strategy<Value = ToolUseBlock> {
     (
-        "[a-zA-Z0-9_-]{1,20}",  // id
-        "[a-zA-Z_][a-zA-Z0-9_]{0,20}",  // name
-        arb_json_value(),  // input
+        "[a-zA-Z0-9_-]{1,20}",         // id
+        "[a-zA-Z_][a-zA-Z0-9_]{0,20}", // name
+        arb_json_value(),              // input
     )
         .prop_map(|(id, name, input)| ToolUseBlock { id, name, input })
 }
@@ -103,16 +102,13 @@ fn arb_message() -> impl Strategy<Value = Message> {
         )
             .prop_map(|(content, usage)| Message::Assistant { content, usage }),
         // ToolResult variant
-        (
-            "[a-zA-Z0-9_-]{1,20}",
-            "[^\x00]{0,100}",
-            any::<bool>(),
-        )
-            .prop_map(|(tool_use_id, content, is_error)| Message::ToolResult {
+        ("[a-zA-Z0-9_-]{1,20}", "[^\x00]{0,100}", any::<bool>(),).prop_map(
+            |(tool_use_id, content, is_error)| Message::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            }),
+            }
+        ),
     ]
 }
 
@@ -153,8 +149,8 @@ fn arb_stream_chunk() -> impl Strategy<Value = StreamChunk> {
 fn arb_pending_approval() -> impl Strategy<Value = PendingApproval> {
     (
         "[a-zA-Z_][a-zA-Z0-9_]{0,20}", // tool_name
-        arb_json_value(),               // tool_input
-        "[a-zA-Z0-9_-]{1,20}",          // request_id
+        arb_json_value(),              // tool_input
+        "[a-zA-Z0-9_-]{1,20}",         // request_id
     )
         .prop_map(|(tool_name, tool_input, request_id)| PendingApproval {
             tool_name,
@@ -166,15 +162,22 @@ fn arb_pending_approval() -> impl Strategy<Value = PendingApproval> {
 /// Strategy for generating arbitrary CompactionState values.
 fn arb_compaction_state() -> impl Strategy<Value = CompactionState> {
     (
-        any::<u32>(),                       // total_compactions
-        0..1000usize,                       // messages_removed
-        proptest::option::of(any::<u32>()), // last_compaction_turn
-        0..10u32,                           // consecutive_failures
-        any::<bool>(),                      // circuit_broken
+        any::<u32>(),                         // total_compactions
+        0..1000usize,                         // messages_removed
+        proptest::option::of(any::<u32>()),   // last_compaction_turn
+        0..10u32,                             // consecutive_failures
+        any::<bool>(),                        // circuit_broken
         proptest::option::of(0..500000usize), // last_token_count
     )
         .prop_map(
-            |(total_compactions, messages_removed, last_compaction_turn, consecutive_failures, circuit_broken, last_token_count)| CompactionState {
+            |(
+                total_compactions,
+                messages_removed,
+                last_compaction_turn,
+                consecutive_failures,
+                circuit_broken,
+                last_token_count,
+            )| CompactionState {
                 total_compactions,
                 messages_removed,
                 last_compaction_turn,
@@ -192,18 +195,18 @@ fn arb_compaction_state() -> impl Strategy<Value = CompactionState> {
 /// total_cost_usd uses finite f64 values to ensure JSON round-trip correctness.
 fn arb_run_state() -> impl Strategy<Value = RunState> {
     (
-        "[a-zA-Z0-9_-]{1,30}",                          // run_id
-        proptest::option::of("[a-zA-Z0-9_-]{1,30}"),     // session_id
-        prop::collection::vec(arb_message(), 0..5),      // messages
-        any::<u32>(),                                    // current_turn
-        proptest::option::of(1..100u32),                 // max_turns
+        "[a-zA-Z0-9_-]{1,30}",                       // run_id
+        proptest::option::of("[a-zA-Z0-9_-]{1,30}"), // session_id
+        prop::collection::vec(arb_message(), 0..5),  // messages
+        any::<u32>(),                                // current_turn
+        proptest::option::of(1..100u32),             // max_turns
         // Generate f64 as integer cents divided by 100 to ensure JSON round-trip
         // (avoids floating-point precision issues with arbitrary f64 in JSON)
         (-100_000i64..100_000i64).prop_map(|cents| cents as f64 / 100.0), // total_cost_usd
-        arb_usage(),                                     // total_usage
-        prop::collection::vec(arb_pending_approval(), 0..3), // pending_approvals
-        arb_compaction_state(),                          // compaction_state
-        "[a-zA-Z0-9_-]{0,30}",                          // trace_id
+        arb_usage(),                                                      // total_usage
+        prop::collection::vec(arb_pending_approval(), 0..3),              // pending_approvals
+        arb_compaction_state(),                                           // compaction_state
+        "[a-zA-Z0-9_-]{0,30}",                                            // trace_id
     )
         .prop_map(
             |(
@@ -317,7 +320,6 @@ proptest! {
         prop_assert_eq!(&state, &restored);
     }
 }
-
 
 // --- Property 3: RunState deserialization robustness ---
 

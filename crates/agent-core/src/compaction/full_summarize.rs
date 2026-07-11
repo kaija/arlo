@@ -61,10 +61,8 @@ impl FullSummarizeLayer {
         let adjusted_indices = ensure_pair_integrity(messages, &indices_to_summarize);
 
         // Collect references to messages we're going to summarize.
-        let messages_to_summarize: Vec<&Message> = adjusted_indices
-            .iter()
-            .map(|&idx| &messages[idx])
-            .collect();
+        let messages_to_summarize: Vec<&Message> =
+            adjusted_indices.iter().map(|&idx| &messages[idx]).collect();
 
         // Build the 9-section summarization prompt.
         let prompt = build_summarization_prompt(&messages_to_summarize);
@@ -121,7 +119,7 @@ impl FullSummarizeLayer {
             .enumerate()
             .filter(|(_, msg)| matches!(msg, Message::System { .. }))
             .map(|(idx, _)| idx + 1)
-            .last()
+            .next_back()
             .unwrap_or(0);
 
         messages.insert(
@@ -198,12 +196,7 @@ pub fn ensure_pair_integrity(messages: &[Message], indices_to_summarize: &[usize
 
     // Also check: if the last index in our adjusted set is an Assistant ToolUse
     // message, we need to pull in its corresponding ToolResult.
-    loop {
-        let last_idx = match adjusted.last() {
-            Some(&idx) => idx,
-            None => break,
-        };
-
+    while let Some(&last_idx) = adjusted.last() {
         if let Message::Assistant { content, .. } = &messages[last_idx] {
             // Collect tool_use_ids from this assistant message.
             let tool_use_ids: Vec<&str> = content
@@ -249,7 +242,11 @@ pub fn ensure_pair_integrity(messages: &[Message], indices_to_summarize: &[usize
 
 /// Find the index of the Assistant message containing a ToolUse with the given ID,
 /// searching backwards from `before_idx`.
-fn find_tool_use_index(messages: &[Message], tool_use_id: &str, before_idx: usize) -> Option<usize> {
+fn find_tool_use_index(
+    messages: &[Message],
+    tool_use_id: &str,
+    before_idx: usize,
+) -> Option<usize> {
     for idx in (0..before_idx).rev() {
         if let Message::Assistant { content, .. } = &messages[idx] {
             let has_matching_tool_use = content.iter().any(|block| match block {
@@ -343,10 +340,8 @@ pub fn format_messages_for_summary(messages: &[&Message]) -> String {
                             output.push_str("[image]");
                         }
                         ContentBlock::ToolUse { block } => {
-                            output.push_str(&format!(
-                                "[tool_use: {}({})]",
-                                block.name, block.input
-                            ));
+                            output
+                                .push_str(&format!("[tool_use: {}({})]", block.name, block.input));
                         }
                     }
                 }
@@ -373,12 +368,12 @@ pub fn format_messages_for_summary(messages: &[&Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction::config::CompactionLayerConfig;
+    use crate::error::ModelError;
     use crate::message::ToolUseBlock;
     use crate::message::Usage;
     use crate::model::ModelStream;
-    use crate::error::ModelError;
     use crate::stream::StopReason;
-    use crate::compaction::config::CompactionLayerConfig;
     use async_trait::async_trait;
     use serde_json::json;
 
@@ -453,11 +448,11 @@ mod tests {
         // Scenario: first preserved message is a ToolResult,
         // so we need to pull it and its matching ToolUse into the summarize set.
         let messages = vec![
-            user_msg("Turn 1"),                      // 0
-            assistant_tool_use("t1", "file_read"),   // 1
-            tool_result("t1", "file content"),       // 2
-            user_msg("Turn 2"),                      // 3
-            assistant_msg("response"),               // 4
+            user_msg("Turn 1"),                    // 0
+            assistant_tool_use("t1", "file_read"), // 1
+            tool_result("t1", "file content"),     // 2
+            user_msg("Turn 2"),                    // 3
+            assistant_msg("response"),             // 4
         ];
         // If we try to summarize indices [0] (just the first user msg),
         // the first preserved non-system is index 1 (assistant tool use), not a ToolResult, so no change.
@@ -470,11 +465,11 @@ mod tests {
     fn test_pair_integrity_tool_result_is_first_preserved() {
         // Scenario: indices to summarize = [0, 1], first preserved = [2] which is a ToolResult
         let messages = vec![
-            user_msg("Turn 1"),                      // 0
-            assistant_tool_use("t1", "file_read"),   // 1
-            tool_result("t1", "file content"),       // 2
-            user_msg("Turn 2"),                      // 3
-            assistant_msg("response"),               // 4
+            user_msg("Turn 1"),                    // 0
+            assistant_tool_use("t1", "file_read"), // 1
+            tool_result("t1", "file content"),     // 2
+            user_msg("Turn 2"),                    // 3
+            assistant_msg("response"),             // 4
         ];
         let indices = vec![0, 1]; // summarize user msg + assistant tool use
         let result = ensure_pair_integrity(&messages, &indices);
@@ -488,16 +483,16 @@ mod tests {
         // Scenario: last summarized message is an assistant ToolUse, so we
         // also pull in the matching ToolResult.
         let messages = vec![
-            user_msg("Turn 1"),                      // 0
-            assistant_tool_use("t1", "file_read"),   // 1
-            tool_result("t1", "file content"),       // 2
-            user_msg("Turn 2"),                      // 3
-            assistant_msg("response"),               // 4
+            user_msg("Turn 1"),                    // 0
+            assistant_tool_use("t1", "file_read"), // 1
+            tool_result("t1", "file content"),     // 2
+            user_msg("Turn 2"),                    // 3
+            assistant_msg("response"),             // 4
         ];
         let indices = vec![0, 1]; // summarize [user, assistant_tool_use]
-        // The last item (index 1) is an Assistant with ToolUse.
-        // Its ToolResult is at index 2 — should be pulled in.
-        // Then index 2 is a ToolResult which is first preserved... same logic pulls it in.
+                                  // The last item (index 1) is an Assistant with ToolUse.
+                                  // Its ToolResult is at index 2 — should be pulled in.
+                                  // Then index 2 is a ToolResult which is first preserved... same logic pulls it in.
         let result = ensure_pair_integrity(&messages, &indices);
         assert_eq!(result, vec![0, 1, 2]);
     }
@@ -627,13 +622,27 @@ mod tests {
             })
         }
 
-        fn name(&self) -> &str { "success-mock-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { false }
-        fn input_cost_per_million(&self) -> f64 { 0.0 }
-        fn output_cost_per_million(&self) -> f64 { 0.0 }
+        fn name(&self) -> &str {
+            "success-mock-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            0.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            0.0
+        }
     }
 
     /// A mock model that always returns an error (simulating model failure).
@@ -646,16 +655,32 @@ mod tests {
         }
 
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
-            Err(ModelError::Connection("simulated model failure".to_string()))
+            Err(ModelError::Connection(
+                "simulated model failure".to_string(),
+            ))
         }
 
-        fn name(&self) -> &str { "fail-mock-model" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { false }
-        fn input_cost_per_million(&self) -> f64 { 0.0 }
-        fn output_cost_per_million(&self) -> f64 { 0.0 }
+        fn name(&self) -> &str {
+            "fail-mock-model"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            0.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            0.0
+        }
     }
 
     /// Helper to build a CompactionContext for tests.
@@ -694,9 +719,7 @@ mod tests {
             // Generate between min_non_system+1 and min_non_system+20 non-system messages
             let count_range = (min_non_system + 1)..=(min_non_system + 20);
             count_range.prop_flat_map(move |count| {
-                let strategies: Vec<_> = (0..count)
-                    .map(|i| arb_non_system_message(i))
-                    .collect();
+                let strategies: Vec<_> = (0..count).map(arb_non_system_message).collect();
                 strategies
             })
         }

@@ -43,7 +43,10 @@ impl HeadingRule {
     /// Extract the heading level (1-6) from a tag name like "h1", "h2", etc.
     fn heading_level(tag: &str) -> Option<u8> {
         if tag.len() == 2 && tag.starts_with('h') {
-            tag[1..].parse::<u8>().ok().filter(|&n| (1..=6).contains(&n))
+            tag[1..]
+                .parse::<u8>()
+                .ok()
+                .filter(|&n| (1..=6).contains(&n))
         } else {
             None
         }
@@ -235,7 +238,7 @@ impl ConversionRule for FencedCodeBlockRule {
             }
         }
 
-        let fence: String = std::iter::repeat(fence_char).take(fence_size).collect();
+        let fence: String = std::iter::repeat_n(fence_char, fence_size).collect();
         let code_trimmed = code_text.trim_end_matches('\n');
 
         format!("\n\n{}{}\n{}\n{}\n\n", fence, language, code_trimmed, fence)
@@ -279,7 +282,10 @@ impl ConversionRule for EmphasisRule {
         if content.trim().is_empty() {
             return String::new();
         }
-        format!("{}{}{}", options.em_delimiter, content, options.em_delimiter)
+        format!(
+            "{}{}{}",
+            options.em_delimiter, content, options.em_delimiter
+        )
     }
 }
 
@@ -331,7 +337,7 @@ impl ConversionRule for InlineCodeRule {
         }
 
         // Normalize newlines to spaces
-        let normalized = text.replace(|c: char| c == '\r' || c == '\n', " ");
+        let normalized = text.replace(['\r', '\n'], " ");
 
         // Choose backtick delimiter that doesn't conflict with content
         let mut delimiter = "`".to_string();
@@ -342,9 +348,7 @@ impl ConversionRule for InlineCodeRule {
         // Add padding if content starts/ends with backtick or starts+ends with space
         let needs_space = normalized.starts_with('`')
             || normalized.ends_with('`')
-            || (normalized.starts_with(' ')
-                && normalized.ends_with(' ')
-                && normalized.len() > 1);
+            || (normalized.starts_with(' ') && normalized.ends_with(' ') && normalized.len() > 1);
         let space = if needs_space { " " } else { "" };
 
         format!("{}{}{}{}{}", delimiter, space, normalized, space, delimiter)
@@ -466,9 +470,9 @@ pub fn builtin_rules(_options: &Options) -> Vec<NamedRule> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::node_info::{FlankingWhitespace, NodeContext};
     use super::*;
     use std::collections::HashMap;
-    use super::super::node_info::{FlankingWhitespace, NodeContext};
 
     fn make_node(tag: &str) -> NodeInfo {
         NodeInfo::new(
@@ -525,7 +529,11 @@ mod tests {
         let rule = HeadingRule;
         let options = Options::default();
         for tag in &["h1", "h2", "h3", "h4", "h5", "h6"] {
-            assert!(rule.filter(&make_node(tag), &options), "Should match {}", tag);
+            assert!(
+                rule.filter(&make_node(tag), &options),
+                "Should match {}",
+                tag
+            );
         }
     }
 
@@ -1816,7 +1824,7 @@ mod tests {
             suffix in "[a-z]{0,5}"
         ) {
             // Create content with backtick sequences
-            let backticks: String = std::iter::repeat('`').take(backtick_count).collect();
+            let backticks: String = std::iter::repeat_n('`', backtick_count).collect();
             let code_content = format!("{}{}{}", prefix, backticks, suffix);
 
             // Create a node simulating <pre> with first child <code> containing the text
@@ -1850,7 +1858,7 @@ mod tests {
             prefix in "[a-z]{0,5}",
             suffix in "[a-z]{0,5}"
         ) {
-            let backticks: String = std::iter::repeat('`').take(backtick_count).collect();
+            let backticks: String = std::iter::repeat_n('`', backtick_count).collect();
             let code_content = format!("{}{}{}", prefix, backticks, suffix);
 
             let node = make_code_node(&code_content, false);
@@ -1861,7 +1869,7 @@ mod tests {
 
             // Extract the delimiter (opening backticks)
             let delimiter_len = result.chars().take_while(|&c| c == '`').count();
-            let delimiter: String = std::iter::repeat('`').take(delimiter_len).collect();
+            let delimiter: String = std::iter::repeat_n('`', delimiter_len).collect();
 
             // The delimiter should NOT appear in the original content
             prop_assert!(

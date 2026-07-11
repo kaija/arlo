@@ -26,7 +26,10 @@ pub enum StreamChunk {
     ToolUseInputDelta { id: String, delta: String },
 
     /// Signals the end of a tool use block with the complete parsed input.
-    ToolUseEnd { id: String, input: serde_json::Value },
+    ToolUseEnd {
+        id: String,
+        input: serde_json::Value,
+    },
 
     /// Signals the end of the model's message with a stop reason and usage.
     MessageStop {

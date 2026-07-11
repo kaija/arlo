@@ -19,12 +19,12 @@ impl SessionMemoryLayer {
         messages
             .iter()
             .filter(|msg| match msg {
-                Message::User { content } => {
-                    content.iter().any(|b| matches!(b, ContentBlock::Text { .. }))
-                }
-                Message::Assistant { content, .. } => {
-                    content.iter().any(|b| matches!(b, ContentBlock::Text { .. }))
-                }
+                Message::User { content } => content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. })),
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. })),
                 _ => false,
             })
             .count()
@@ -57,7 +57,7 @@ impl SessionMemoryLayer {
             .enumerate()
             .filter(|(_, msg)| matches!(msg, Message::System { .. }))
             .map(|(idx, _)| idx + 1)
-            .last()
+            .next_back()
             .unwrap_or(0)
     }
 }
@@ -158,8 +158,10 @@ mod tests {
     fn config_with_memory_file(content: &str) -> (CompactionLayerConfig, NamedTempFile) {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", content).unwrap();
-        let mut config = CompactionLayerConfig::default();
-        config.session_memory_path = Some(file.path().to_path_buf());
+        let config = CompactionLayerConfig {
+            session_memory_path: Some(file.path().to_path_buf()),
+            ..Default::default()
+        };
         (config, file)
     }
 
@@ -218,10 +220,7 @@ mod tests {
         let ctx = make_context(config);
         let layer = SessionMemoryLayer;
         // Only 2 text-block messages (below the 5 threshold)
-        let mut messages = vec![
-            large_user_message(1000),
-            text_assistant_message("response"),
-        ];
+        let mut messages = vec![large_user_message(1000), text_assistant_message("response")];
         assert_eq!(layer.apply(&mut messages, &ctx), LayerResult::Noop);
     }
 
@@ -240,7 +239,7 @@ mod tests {
             Message::System {
                 content: "system instruction".to_string(),
             },
-            large_user_message(500),  // old — should be removed
+            large_user_message(500), // old — should be removed
             text_assistant_message("old response one with enough text to be significant"),
             text_user_message("recent message"),
             text_assistant_message("recent response"),
@@ -352,8 +351,10 @@ mod tests {
 
     #[test]
     fn noop_when_session_memory_path_does_not_exist() {
-        let mut config = CompactionLayerConfig::default();
-        config.session_memory_path = Some("/nonexistent/path/to/memory.md".into());
+        let config = CompactionLayerConfig {
+            session_memory_path: Some("/nonexistent/path/to/memory.md".into()),
+            ..Default::default()
+        };
         let ctx = make_context(config);
         let layer = SessionMemoryLayer;
         let mut messages = vec![large_user_message(5000)];
@@ -391,7 +392,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod proptests {
     use super::*;
@@ -401,7 +401,7 @@ mod proptests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    /// **Validates: Requirements 3.1, 3.2, 3.3, 3.5, 3.6**
+    // **Validates: Requirements 3.1, 3.2, 3.3, 3.5, 3.6**
 
     // --- Strategies ---
 
@@ -422,10 +422,7 @@ mod proptests {
     }
 
     /// Generate an Assistant message with a text block of given size range.
-    fn arb_assistant_message(
-        min_chars: usize,
-        max_chars: usize,
-    ) -> impl Strategy<Value = Message> {
+    fn arb_assistant_message(min_chars: usize, max_chars: usize) -> impl Strategy<Value = Message> {
         arb_text_block(min_chars, max_chars).prop_map(|block| Message::Assistant {
             content: vec![block],
             usage: None,
@@ -474,11 +471,13 @@ mod proptests {
     ) -> (CompactionLayerConfig, NamedTempFile) {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", content).unwrap();
-        let mut config = CompactionLayerConfig::default();
-        config.session_memory_path = Some(file.path().to_path_buf());
-        config.session_memory_min_tokens = min_tokens;
-        config.session_memory_min_messages = min_messages;
-        config.session_memory_max_preserved_tokens = max_preserved_tokens;
+        let config = CompactionLayerConfig {
+            session_memory_path: Some(file.path().to_path_buf()),
+            session_memory_min_tokens: min_tokens,
+            session_memory_min_messages: min_messages,
+            session_memory_max_preserved_tokens: max_preserved_tokens,
+            ..Default::default()
+        };
         (config, file)
     }
 

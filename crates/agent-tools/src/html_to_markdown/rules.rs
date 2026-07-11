@@ -7,6 +7,9 @@
 use super::node_info::NodeInfo;
 use super::options::Options;
 
+/// A closure predicate for matching nodes.
+pub type RuleFilterPredicate = Box<dyn Fn(&NodeInfo, &Options) -> bool + Send + Sync>;
+
 /// Specifies which nodes a conversion rule applies to.
 pub enum RuleFilter {
     /// Match a single element by tag name.
@@ -14,7 +17,7 @@ pub enum RuleFilter {
     /// Match any of several element tag names.
     Tags(Vec<String>),
     /// Match via a closure predicate.
-    Predicate(Box<dyn Fn(&NodeInfo, &Options) -> bool + Send + Sync>),
+    Predicate(RuleFilterPredicate),
 }
 
 /// A conversion rule that transforms an HTML element into markdown.
@@ -247,9 +250,9 @@ impl ConversionRule for KeepRule {
 
 #[cfg(test)]
 mod tests {
+    use super::super::node_info::{FlankingWhitespace, NodeContext};
     use super::*;
     use std::collections::HashMap;
-    use super::super::node_info::{FlankingWhitespace, NodeContext};
 
     /// A simple test rule that matches <p> tags.
     struct ParagraphRule;

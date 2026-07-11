@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 use agent_core::error::ToolError;
+use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 use crate::error::MCPError;
 
@@ -158,9 +158,7 @@ impl Tool for MCPToolWrapper {
                 "MCP server '{}' is not connected",
                 self.server_name
             ))),
-            Err(MCPError::JsonRpc {
-                code, message, ..
-            }) => Ok(ToolOutput::Error(format!(
+            Err(MCPError::JsonRpc { code, message, .. }) => Ok(ToolOutput::Error(format!(
                 "MCP server '{}' returned error [{}]: {}",
                 self.server_name, code, message
             ))),
@@ -185,18 +183,18 @@ pub fn convert_mcp_tools(
     definitions
         .into_iter()
         .map(|def| {
-            let wrapper = MCPToolWrapper::new(
-                Arc::clone(&server),
-                def,
-                server_name.to_string(),
-            );
+            let wrapper = MCPToolWrapper::new(Arc::clone(&server), def, server_name.to_string());
             Arc::new(wrapper) as Arc<dyn Tool>
         })
         .collect()
 }
 
 /// Builds a JSON-RPC request for invoking a tool.
-pub fn build_call_tool_request(id: u64, tool_name: &str, input: serde_json::Value) -> serde_json::Value {
+pub fn build_call_tool_request(
+    id: u64,
+    tool_name: &str,
+    input: serde_json::Value,
+) -> serde_json::Value {
     let request = JsonRpcRequest {
         jsonrpc: "2.0",
         id,
@@ -613,11 +611,7 @@ mod tests {
             }),
         };
 
-        let wrapper = MCPToolWrapper::new(
-            Arc::clone(&server_arc),
-            def.clone(),
-            "srv".to_string(),
-        );
+        let wrapper = MCPToolWrapper::new(Arc::clone(&server_arc), def.clone(), "srv".to_string());
 
         assert_eq!(wrapper.name(), "my_tool");
         assert_eq!(wrapper.description(), "Does something useful");

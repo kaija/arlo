@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::task_store::{
-    CreateTaskParams, TaskEntry, TaskId, TaskStatus, TaskStatusCounts, TaskStoreError, TaskStore,
+    CreateTaskParams, TaskEntry, TaskId, TaskStatus, TaskStatusCounts, TaskStore, TaskStoreError,
     TaskUsage, TodoItem, TodoStatus,
 };
 
@@ -336,11 +336,7 @@ impl TaskStore for InMemoryTaskStore {
             .ok_or_else(|| TaskStoreError::NotFound { id: id.to_string() })
     }
 
-    async fn update_todo_status(
-        &self,
-        id: &str,
-        status: TodoStatus,
-    ) -> Result<(), TaskStoreError> {
+    async fn update_todo_status(&self, id: &str, status: TodoStatus) -> Result<(), TaskStoreError> {
         let mut todos = self.todos.write().await;
         let item = todos
             .iter_mut()
@@ -378,9 +374,9 @@ impl TaskStore for InMemoryTaskStore {
 mod tests {
     use super::*;
     use crate::task_store::{CreateTaskParams, TaskStore, TaskType};
-    use std::collections::HashSet;
-    use proptest::prelude::*;
     use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
 
     // ── Strategies ──────────────────────────────────────────────────────────
 
@@ -546,10 +542,7 @@ mod tests {
 
     /// Strategy to generate a Vec of (content, active_form) tuples for todo items.
     fn todo_inputs_strategy() -> impl Strategy<Value = Vec<(String, Option<String>)>> {
-        prop_vec(
-            ("\\PC{1,50}", proptest::option::of("\\PC{1,30}")),
-            1..20,
-        )
+        prop_vec(("\\PC{1,50}", proptest::option::of("\\PC{1,30}")), 1..20)
     }
 
     proptest! {
@@ -1262,7 +1255,7 @@ mod tests {
 
                 // Create tasks and move them to terminal states
                 let mut task_ids = Vec::with_capacity(count);
-                for i in 0..count {
+                for (i, terminal_status) in terminal_statuses.iter().enumerate().take(count) {
                     let params = CreateTaskParams {
                         description: format!("task-{}", i),
                         task_type: TaskType::Background,
@@ -1272,7 +1265,7 @@ mod tests {
                     let id = store.create_task(params).await.expect("create_task should succeed");
 
                     // Move to terminal state based on the generated strategy
-                    match terminal_statuses[i] {
+                    match terminal_status {
                         TaskStatus::Completed => {
                             store
                                 .transition_task(&id, TaskStatus::Running, None)
@@ -1307,13 +1300,13 @@ mod tests {
 
                 // Acknowledge a subset based on the random bool flags
                 let mut acknowledged_ids: HashSet<String> = HashSet::new();
-                for i in 0..count {
-                    if acknowledge_flags[i] {
+                for (id, &flag) in task_ids.iter().zip(acknowledge_flags.iter()).take(count) {
+                    if flag {
                         store
-                            .acknowledge_task(&task_ids[i])
+                            .acknowledge_task(id)
                             .await
                             .expect("acknowledge_task should succeed");
-                        acknowledged_ids.insert(task_ids[i].clone());
+                        acknowledged_ids.insert(id.clone());
                     }
                 }
 
@@ -1335,12 +1328,12 @@ mod tests {
                 }
 
                 // All non-acknowledged task IDs should appear in unacknowledged list
-                for i in 0..count {
-                    if !acknowledged_ids.contains(&task_ids[i]) {
+                for id in task_ids.iter().take(count) {
+                    if !acknowledged_ids.contains(id) {
                         prop_assert!(
-                            unacked_ids.contains(&task_ids[i]),
+                            unacked_ids.contains(id),
                             "Non-acknowledged task {} should appear in list_unacknowledged_terminal",
-                            task_ids[i]
+                            id
                         );
                     }
                 }
@@ -1841,7 +1834,7 @@ mod tests {
                 let mut task_final_statuses: Vec<TaskStatus> = Vec::with_capacity(count);
 
                 // Create tasks and move them to their designated final statuses
-                for i in 0..count {
+                for (i, status) in statuses.iter().enumerate().take(count) {
                     let params = CreateTaskParams {
                         description: format!("evict-test-{}", i),
                         task_type: TaskType::Background,
@@ -1850,7 +1843,7 @@ mod tests {
                     };
                     let id = store.create_task(params).await.expect("create_task should succeed");
 
-                    match statuses[i] {
+                    match status {
                         TaskStatus::Pending => {
                             // Already Pending
                         }
@@ -1889,7 +1882,7 @@ mod tests {
                     }
 
                     task_ids.push(id);
-                    task_final_statuses.push(statuses[i]);
+                    task_final_statuses.push(*status);
                 }
 
                 // Acknowledge a subset of terminal tasks (only acknowledge if terminal)
@@ -1995,7 +1988,7 @@ mod tests {
                 let mut task_final_statuses: Vec<TaskStatus> = Vec::with_capacity(count);
 
                 // Create tasks and move them to their designated final statuses
-                for i in 0..count {
+                for (i, status) in statuses.iter().enumerate().take(count) {
                     let params = CreateTaskParams {
                         description: format!("evict-older-test-{}", i),
                         task_type: TaskType::Background,
@@ -2004,7 +1997,7 @@ mod tests {
                     };
                     let id = store.create_task(params).await.expect("create_task should succeed");
 
-                    match statuses[i] {
+                    match status {
                         TaskStatus::Pending => {
                             // Already Pending
                         }
@@ -2043,7 +2036,7 @@ mod tests {
                     }
 
                     task_ids.push(id);
-                    task_final_statuses.push(statuses[i]);
+                    task_final_statuses.push(*status);
                 }
 
                 // First, test with a very large duration — nothing should be evicted
@@ -2057,9 +2050,9 @@ mod tests {
                 );
 
                 // Verify all tasks still exist
-                for i in 0..count {
+                for id in task_ids.iter().take(count) {
                     store
-                        .get_task(&task_ids[i])
+                        .get_task(id)
                         .await
                         .expect("All tasks should still exist after large-duration eviction");
                 }

@@ -38,10 +38,7 @@ pub enum ToolPattern {
     Bare(String),
     /// A compound pattern: exact tool name + glob on primary argument.
     /// E.g., `Bash(npm*)` matches Bash tool with command starting with "npm".
-    Compound {
-        tool_name: String,
-        arg_glob: String,
-    },
+    Compound { tool_name: String, arg_glob: String },
 }
 
 impl ToolPattern {
@@ -114,7 +111,10 @@ impl ToolPattern {
     pub fn is_glob(&self) -> bool {
         match self {
             ToolPattern::Bare(s) => s.contains('*') || s.contains('?'),
-            ToolPattern::Compound { tool_name, arg_glob } => {
+            ToolPattern::Compound {
+                tool_name,
+                arg_glob,
+            } => {
                 tool_name.contains('*')
                     || tool_name.contains('?')
                     || arg_glob.contains('*')
@@ -173,7 +173,10 @@ impl fmt::Display for ToolPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ToolPattern::Bare(s) => write!(f, "{}", s),
-            ToolPattern::Compound { tool_name, arg_glob } => {
+            ToolPattern::Compound {
+                tool_name,
+                arg_glob,
+            } => {
                 write!(f, "{}({})", tool_name, arg_glob)
             }
         }
@@ -245,50 +248,33 @@ pub fn glob_matches(pattern: &str, text: &str) -> bool {
     // We use an iterative two-row DP for efficiency.
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = text.chars().collect();
-    let m = pat.len();
     let n = txt.len();
 
-    // dp[j] = whether pattern[0..i] matches text[0..j]
-    let mut dp = vec![false; n + 1];
-    dp[0] = true; // empty pattern matches empty text
-
-    // Initialize: leading `*`s match empty text
-    for i in 0..m {
-        if pat[i] == '*' {
-            // dp[0] remains true (consecutive stars still match empty)
-        } else {
-            break;
-        }
-        // After processing pat[0..=i] where all are '*', dp[0] = true
-    }
-
-    // Actually, let's use a cleaner two-row DP:
+    // Two-row DP:
     // prev[j] = does pattern[0..i] match text[0..j]
     // curr[j] = does pattern[0..i+1] match text[0..j]
     let mut prev = vec![false; n + 1];
     prev[0] = true; // empty pattern matches empty text
 
-    for i in 0..m {
+    for &p in &pat {
         let mut curr = vec![false; n + 1];
 
-        if pat[i] == '*' {
+        if p == '*' {
             // '*' matches empty (curr[0] = prev[0]) or extends a match
             curr[0] = prev[0];
             for j in 1..=n {
                 // '*' matches zero chars (prev[j]) or one more char (curr[j-1])
                 curr[j] = prev[j] || curr[j - 1];
             }
-        } else if pat[i] == '?' {
+        } else if p == '?' {
             // '?' matches exactly one character
             curr[0] = false;
-            for j in 1..=n {
-                curr[j] = prev[j - 1]; // consume one character
-            }
+            curr[1..(n + 1)].copy_from_slice(&prev[..n]);
         } else {
             // Literal character
             curr[0] = false;
             for j in 1..=n {
-                curr[j] = prev[j - 1] && pat[i] == txt[j - 1];
+                curr[j] = prev[j - 1] && p == txt[j - 1];
             }
         }
 

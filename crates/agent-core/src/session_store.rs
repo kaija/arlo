@@ -45,19 +45,12 @@ pub enum SessionStoreError {
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Append messages to a session, creating it if it does not exist.
-    async fn append(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-    ) -> Result<(), SessionStoreError>;
+    async fn append(&self, session_id: &str, messages: &[Message])
+        -> Result<(), SessionStoreError>;
 
     /// Replace a session's entire history (e.g. after compaction),
     /// creating it if it does not exist.
-    async fn save(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-    ) -> Result<(), SessionStoreError>;
+    async fn save(&self, session_id: &str, messages: &[Message]) -> Result<(), SessionStoreError>;
 
     /// Load a session's full history. Returns `NotFound` for unknown ids.
     async fn load(&self, session_id: &str) -> Result<Vec<Message>, SessionStoreError>;

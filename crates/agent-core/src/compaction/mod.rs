@@ -12,9 +12,9 @@
 pub mod config;
 pub mod full_summarize;
 pub mod layer;
-pub mod tools_compact;
 pub mod session_memory;
 pub mod tokens;
+pub mod tools_compact;
 
 /// Event returned when compaction modifies the message history.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,8 +36,8 @@ use crate::state::CompactionState;
 use self::config::CompactionLayerConfig;
 use self::full_summarize::FullSummarizeLayer;
 use self::layer::{CompactionContext, CompactionLayer, LayerResult};
-use self::tools_compact::ToolsCompactLayer;
 use self::session_memory::SessionMemoryLayer;
+use self::tools_compact::ToolsCompactLayer;
 
 /// The main pipeline that coordinates all compaction layers.
 ///
@@ -63,10 +63,8 @@ impl CompactionPipeline {
     /// Builds the sync layers vector (ToolsCompact, SessionMemory) and includes
     /// the async FullSummarize layer.
     pub fn new(config: CompactionLayerConfig) -> Self {
-        let sync_layers: Vec<Box<dyn CompactionLayer>> = vec![
-            Box::new(ToolsCompactLayer),
-            Box::new(SessionMemoryLayer),
-        ];
+        let sync_layers: Vec<Box<dyn CompactionLayer>> =
+            vec![Box::new(ToolsCompactLayer), Box::new(SessionMemoryLayer)];
         Self {
             sync_layers,
             full_summarize: Some(FullSummarizeLayer),
@@ -84,6 +82,7 @@ impl CompactionPipeline {
     /// 3. Execute sync layers (ToolsCompact, SessionMemory) in order, short-circuit on Applied.
     /// 4. Execute FullSummarize (async) if model is available and sync layers were insufficient.
     /// 5. If all layers fail, increment failure counter (circuit breaker trips at 3).
+    #[allow(clippy::too_many_arguments)]
     pub async fn compact(
         &mut self,
         messages: &mut Vec<Message>,
@@ -220,13 +219,27 @@ mod pipeline_tests {
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
             Err(ModelError::Connection("simulated failure".to_string()))
         }
-        fn name(&self) -> &str { "fail-mock" }
-        fn provider(&self) -> &str { "mock" }
-        fn context_window(&self) -> usize { 200_000 }
-        fn max_output_tokens(&self) -> usize { 8192 }
-        fn supports_tools(&self) -> bool { false }
-        fn input_cost_per_million(&self) -> f64 { 0.0 }
-        fn output_cost_per_million(&self) -> f64 { 0.0 }
+        fn name(&self) -> &str {
+            "fail-mock"
+        }
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            200_000
+        }
+        fn max_output_tokens(&self) -> usize {
+            8192
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            0.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            0.0
+        }
     }
 
     // ========================================================================
@@ -279,7 +292,10 @@ mod pipeline_tests {
 
     /// Create messages that make ToolsCompact able to clear enough to go below threshold.
     /// Uses many old tool results from compactable tools with large content.
-    fn messages_with_clearable_tool_results(num_old_turns: u32, content_size: usize) -> Vec<Message> {
+    fn messages_with_clearable_tool_results(
+        num_old_turns: u32,
+        content_size: usize,
+    ) -> Vec<Message> {
         let big_content = "x".repeat(content_size);
         let mut messages = Vec::new();
 
@@ -526,19 +542,16 @@ mod pipeline_tests {
         // - No session memory file
         // - Too few non-system messages for full_summarize
         let big = "q".repeat(8000); // 2000 tokens each
-        let mut messages = vec![
-            system_msg(&big),
-            user_msg(&big),
-        ];
+        let mut messages = vec![system_msg(&big), user_msg(&big)];
         let mut state = CompactionState::default();
         let config = CompactionLayerConfig::default();
         let mut pipeline = CompactionPipeline::new(config);
 
         let token_count = tokens::estimate_tokens(&messages); // 4000
-        // Set context_window so threshold is BELOW token_count
-        // threshold = context_window - max(max_output_tokens, 20000) - 13000
-        // We want threshold < 4000, e.g., threshold = 3000
-        // 3000 = context_window - 20000 - 13000 => context_window = 36000
+                                                              // Set context_window so threshold is BELOW token_count
+                                                              // threshold = context_window - max(max_output_tokens, 20000) - 13000
+                                                              // We want threshold < 4000, e.g., threshold = 3000
+                                                              // 3000 = context_window - 20000 - 13000 => context_window = 36000
         let context_window = 36_000;
         let max_output_tokens = 8192;
         // threshold = 36000 - 20000 - 13000 = 3000
@@ -546,7 +559,15 @@ mod pipeline_tests {
 
         // Attempt 1
         let r1 = pipeline
-            .compact(&mut messages, &mut state, token_count, context_window, max_output_tokens, 1, None)
+            .compact(
+                &mut messages,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                1,
+                None,
+            )
             .await;
         assert!(r1.is_none());
         assert_eq!(pipeline.consecutive_failures(), 1);
@@ -554,7 +575,15 @@ mod pipeline_tests {
 
         // Attempt 2
         let r2 = pipeline
-            .compact(&mut messages, &mut state, token_count, context_window, max_output_tokens, 2, None)
+            .compact(
+                &mut messages,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                2,
+                None,
+            )
             .await;
         assert!(r2.is_none());
         assert_eq!(pipeline.consecutive_failures(), 2);
@@ -562,7 +591,15 @@ mod pipeline_tests {
 
         // Attempt 3 — should trip circuit breaker
         let r3 = pipeline
-            .compact(&mut messages, &mut state, token_count, context_window, max_output_tokens, 3, None)
+            .compact(
+                &mut messages,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                3,
+                None,
+            )
             .await;
         assert!(r3.is_none());
         assert_eq!(pipeline.consecutive_failures(), 3);
@@ -570,7 +607,15 @@ mod pipeline_tests {
 
         // Attempt 4 — circuit breaker is tripped, should skip entirely
         let r4 = pipeline
-            .compact(&mut messages, &mut state, token_count, context_window, max_output_tokens, 4, None)
+            .compact(
+                &mut messages,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                4,
+                None,
+            )
             .await;
         assert!(r4.is_none());
         // Failures don't increment further once broken
@@ -586,20 +631,34 @@ mod pipeline_tests {
         // First: drive 2 failures with messages that can't be compacted
         let big = "q".repeat(8000); // 2000 tokens each
         let token_count = 4000usize; // 2 messages * 2000 tokens
-        // threshold = 36000 - 20000 - 13000 = 3000 < 4000 => fires
+                                     // threshold = 36000 - 20000 - 13000 = 3000 < 4000 => fires
         let context_window = 36_000;
         let max_output_tokens = 8192;
 
-        let mut messages_fail = vec![
-            system_msg(&big),
-            user_msg(&big),
-        ];
-        pipeline.compact(&mut messages_fail, &mut state, token_count, context_window, max_output_tokens, 1, None).await;
-        let mut messages_fail2 = vec![
-            system_msg(&big),
-            user_msg(&big),
-        ];
-        pipeline.compact(&mut messages_fail2, &mut state, token_count, context_window, max_output_tokens, 2, None).await;
+        let mut messages_fail = vec![system_msg(&big), user_msg(&big)];
+        pipeline
+            .compact(
+                &mut messages_fail,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                1,
+                None,
+            )
+            .await;
+        let mut messages_fail2 = vec![system_msg(&big), user_msg(&big)];
+        pipeline
+            .compact(
+                &mut messages_fail2,
+                &mut state,
+                token_count,
+                context_window,
+                max_output_tokens,
+                2,
+                None,
+            )
+            .await;
         assert_eq!(pipeline.consecutive_failures(), 2);
 
         // Now succeed: messages with clearable tool results

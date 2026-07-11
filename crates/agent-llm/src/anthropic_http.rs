@@ -15,11 +15,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
+use crate::convert::anthropic as anthropic_convert;
 use agent_core::error::ModelError;
 use agent_core::message::Usage;
 use agent_core::model::{Model, ModelRequest, ModelResponse, ModelStream};
 use agent_core::stream::{StopReason, StreamChunk};
-use crate::convert::anthropic as anthropic_convert;
 
 /// An Anthropic Messages API model that makes real HTTP calls.
 #[derive(Debug, Clone)]
@@ -119,8 +119,7 @@ impl AnthropicHttpModel {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-api-key",
-            HeaderValue::from_str(&self.api_key)
-                .unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&self.api_key).unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -131,11 +130,7 @@ impl AnthropicHttpModel {
     ///
     /// - HTTP 429/529 → `ModelError::RateLimited` with retry-after header parsed as seconds × 1000, default 5000ms
     /// - Other 4xx/5xx → `ModelError::Api { status, body }` with body sanitized
-    fn map_http_error(
-        status_code: u16,
-        headers: &HeaderMap,
-        body: &[u8],
-    ) -> ModelError {
+    fn map_http_error(status_code: u16, headers: &HeaderMap, body: &[u8]) -> ModelError {
         match status_code {
             429 | 529 => {
                 // Parse retry-after header (value in seconds, convert to ms)
@@ -167,8 +162,7 @@ impl AnthropicHttpModel {
 
         // Detect HTML error pages (case-insensitive)
         let lower = trimmed.to_lowercase();
-        let is_html = lower.starts_with("<!doctype html")
-            || lower.starts_with("<html");
+        let is_html = lower.starts_with("<!doctype html") || lower.starts_with("<html");
 
         if is_html {
             // Try to extract <title> content
@@ -221,7 +215,11 @@ impl Model for AnthropicHttpModel {
             let status_code = status.as_u16();
             let response_headers = response.headers().clone();
             let body_bytes = response.bytes().await.unwrap_or_default();
-            return Err(Self::map_http_error(status_code, &response_headers, &body_bytes));
+            return Err(Self::map_http_error(
+                status_code,
+                &response_headers,
+                &body_bytes,
+            ));
         }
 
         // 4. Set up channel and spawn parser task
@@ -233,8 +231,7 @@ impl Model for AnthropicHttpModel {
             let mut byte_stream = response.bytes_stream();
 
             loop {
-                let chunk_result =
-                    tokio::time::timeout(idle_timeout, byte_stream.next()).await;
+                let chunk_result = tokio::time::timeout(idle_timeout, byte_stream.next()).await;
 
                 match chunk_result {
                     Ok(Some(Ok(bytes))) => {
@@ -257,10 +254,7 @@ impl Model for AnthropicHttpModel {
                     Ok(Some(Err(e))) => {
                         // Stream read error
                         let _ = tx
-                            .send(Err(ModelError::Connection(format!(
-                                "Stream error: {}",
-                                e
-                            ))))
+                            .send(Err(ModelError::Connection(format!("Stream error: {}", e))))
                             .await;
                         return;
                     }
@@ -270,8 +264,7 @@ impl Model for AnthropicHttpModel {
                             // No events at all - signal fallback needed
                             let _ = tx
                                 .send(Err(ModelError::Connection(
-                                    "Stream produced no events (fallback needed)"
-                                        .to_string(),
+                                    "Stream produced no events (fallback needed)".to_string(),
                                 )))
                                 .await;
                             return;
@@ -352,17 +345,18 @@ impl Model for AnthropicHttpModel {
         })?;
 
         // Extract content blocks using from_wire()
-        let content_value = response_body.get("content").ok_or_else(|| ModelError::Api {
-            status: 0,
-            body: "Response missing 'content' field".to_string(),
-        })?;
+        let content_value = response_body
+            .get("content")
+            .ok_or_else(|| ModelError::Api {
+                status: 0,
+                body: "Response missing 'content' field".to_string(),
+            })?;
 
-        let core_blocks = anthropic_convert::from_wire(content_value).map_err(|e| {
-            ModelError::Api {
+        let core_blocks =
+            anthropic_convert::from_wire(content_value).map_err(|e| ModelError::Api {
                 status: 0,
                 body: format!("Failed to parse response content: {}", e),
-            }
-        })?;
+            })?;
 
         // Convert agent_core::message::ContentBlock to agent_core::model::ContentBlock
         let content: Vec<agent_core::model::ContentBlock> = core_blocks
@@ -558,8 +552,7 @@ impl SseParserState {
             if let Some(ActiveBlock::ToolUse { id, json_buf, .. }) =
                 self.active_blocks.remove(&index)
             {
-                let input = serde_json::from_str::<Value>(&json_buf)
-                    .unwrap_or_else(|_| json!({}));
+                let input = serde_json::from_str::<Value>(&json_buf).unwrap_or_else(|_| json!({}));
                 chunks.push(StreamChunk::ToolUseEnd { id, input });
             }
         }
@@ -811,8 +804,7 @@ impl SseParserState {
 
         match self.active_blocks.remove(&index) {
             Some(ActiveBlock::ToolUse { id, json_buf, .. }) => {
-                let input = serde_json::from_str::<Value>(&json_buf)
-                    .unwrap_or_else(|_| json!({}));
+                let input = serde_json::from_str::<Value>(&json_buf).unwrap_or_else(|_| json!({}));
                 vec![StreamChunk::ToolUseEnd { id, input }]
             }
             Some(ActiveBlock::Text) | Some(ActiveBlock::Thinking) => {
@@ -861,10 +853,10 @@ impl SseParserState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::message::{Message, ContentBlock};
+    use agent_core::message::{ContentBlock, Message};
     use agent_core::model::{ModelRequest, ToolDefinition};
-    use proptest::prelude::*;
     use proptest::collection::vec;
+    use proptest::prelude::*;
 
     proptest! {
         /// **Property 1: Base URL Trailing Slash Normalization**
@@ -1941,7 +1933,7 @@ mod tests {
             fill_byte in 0u8..26u8,
         ) {
             let fill_char = (b'a' + fill_byte) as char;
-            let body: String = std::iter::repeat(fill_char).take(body_len).collect();
+            let body: String = std::iter::repeat_n(fill_char, body_len).collect();
             let result = AnthropicHttpModel::sanitize_error_body(500, body.as_bytes());
             prop_assert!(result.len() <= 4096,
                 "sanitize_error_body should truncate to at most 4096 chars, got {} for input len {}",
@@ -2013,12 +2005,10 @@ mod tests {
                 } else {
                     format!("<html><head><title>{}</title></head><body><div class=\"error\">Something went wrong</div></body></html>", title_content)
                 }
+            } else if use_doctype {
+                "<!DOCTYPE html><html><body><h1>Error</h1><p>Something happened</p></body></html>".to_string()
             } else {
-                if use_doctype {
-                    "<!DOCTYPE html><html><body><h1>Error</h1><p>Something happened</p></body></html>".to_string()
-                } else {
-                    "<html><body><div>Error occurred</div></body></html>".to_string()
-                }
+                "<html><body><div>Error occurred</div></body></html>".to_string()
             };
 
             let result = AnthropicHttpModel::sanitize_error_body(status_code, html_body.as_bytes());
@@ -2108,7 +2098,10 @@ mod tests {
 
     #[test]
     fn stop_reason_stop_sequence() {
-        assert_eq!(map_stop_reason(Some("stop_sequence")), StopReason::StopSequence);
+        assert_eq!(
+            map_stop_reason(Some("stop_sequence")),
+            StopReason::StopSequence
+        );
     }
 
     // 2. Ping event discarded
@@ -2169,7 +2162,10 @@ mod tests {
         assert!(
             chunks.iter().any(|c| matches!(
                 c,
-                StreamChunk::MessageStop { stop_reason: StopReason::EndTurn, .. }
+                StreamChunk::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                    ..
+                }
             )),
             "flush() should emit MessageStop with EndTurn stop reason"
         );
@@ -2264,7 +2260,11 @@ mod tests {
     fn non_html_error_body_passed_through_truncated() {
         let body: String = "a".repeat(5000);
         let result = AnthropicHttpModel::sanitize_error_body(500, body.as_bytes());
-        assert_eq!(result.len(), 4096, "non-HTML body should be truncated to 4096 chars");
+        assert_eq!(
+            result.len(),
+            4096,
+            "non-HTML body should be truncated to 4096 chars"
+        );
         assert!(result.chars().all(|c| c == 'a'));
     }
 
@@ -2294,7 +2294,9 @@ mod tests {
         let msg_stop = json!({ "type": "message_stop" });
         let chunks = parser.process_bytes(&make_sse_line(&msg_stop));
 
-        let stop_chunk = chunks.iter().find(|c| matches!(c, StreamChunk::MessageStop { .. }));
+        let stop_chunk = chunks
+            .iter()
+            .find(|c| matches!(c, StreamChunk::MessageStop { .. }));
         assert!(stop_chunk.is_some());
         if let Some(StreamChunk::MessageStop { usage, .. }) = stop_chunk {
             assert_eq!(usage.cache_read_tokens, Some(200));
@@ -2335,7 +2337,12 @@ mod tests {
             "delta": { "type": "text_delta", "text": "Hello" }
         });
         let chunks = parser.process_bytes(&make_sse_line(&text_delta));
-        assert_eq!(chunks, vec![StreamChunk::TextDelta { text: "Hello".to_string() }]);
+        assert_eq!(
+            chunks,
+            vec![StreamChunk::TextDelta {
+                text: "Hello".to_string()
+            }]
+        );
 
         // Tool delta at index 1 → ToolUseInputDelta
         let tool_delta = json!({
@@ -2344,10 +2351,13 @@ mod tests {
             "delta": { "type": "input_json_delta", "partial_json": "{\"path\":" }
         });
         let chunks = parser.process_bytes(&make_sse_line(&tool_delta));
-        assert_eq!(chunks, vec![StreamChunk::ToolUseInputDelta {
-            id: "tool_abc".to_string(),
-            delta: "{\"path\":".to_string(),
-        }]);
+        assert_eq!(
+            chunks,
+            vec![StreamChunk::ToolUseInputDelta {
+                id: "tool_abc".to_string(),
+                delta: "{\"path\":".to_string(),
+            }]
+        );
 
         // Another text delta at index 0 → TextDelta
         let text_delta2 = json!({
@@ -2356,7 +2366,12 @@ mod tests {
             "delta": { "type": "text_delta", "text": " world" }
         });
         let chunks = parser.process_bytes(&make_sse_line(&text_delta2));
-        assert_eq!(chunks, vec![StreamChunk::TextDelta { text: " world".to_string() }]);
+        assert_eq!(
+            chunks,
+            vec![StreamChunk::TextDelta {
+                text: " world".to_string()
+            }]
+        );
     }
 
     // 14. Overloaded error in stream body detected
@@ -2378,6 +2393,9 @@ mod tests {
     #[test]
     fn empty_stream_events_received_stays_false() {
         let parser = SseParserState::new(Duration::from_secs(90));
-        assert!(!parser.events_received, "events_received should be false with no events");
+        assert!(
+            !parser.events_received,
+            "events_received should be false with no events"
+        );
     }
 }

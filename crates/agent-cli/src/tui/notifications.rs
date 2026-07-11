@@ -91,12 +91,10 @@ pub async fn poll_notifications(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{CreateTaskParams, InMemoryTaskStore, TaskStore, TaskType};
+    use proptest::prelude::*;
     use std::sync::Arc;
     use std::time::SystemTime;
-    use agent_core::{
-        CreateTaskParams, InMemoryTaskStore, TaskStore, TaskType,
-    };
-    use proptest::prelude::*;
 
     /// Helper to create a completed TaskEntry with given output.
     fn completed_task(description: &str, output: Option<String>) -> TaskEntry {
@@ -361,8 +359,8 @@ mod tests {
     /// Validates: Requirements 3.8, 5.6
     #[test]
     fn prop_acknowledge_prevents_duplicate_notification() {
-        use proptest::test_runner::{TestRunner, TestCaseError};
         use proptest::strategy::Strategy;
+        use proptest::test_runner::{TestCaseError, TestRunner};
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -371,9 +369,8 @@ mod tests {
 
         let mut runner = TestRunner::new(ProptestConfig::with_cases(100));
 
-        runner.run(
-            &("[a-zA-Z0-9 ]{1,50}".prop_map(|s| s)),
-            |description| {
+        runner
+            .run(&("[a-zA-Z0-9 ]{1,50}".prop_map(|s| s)), |description| {
                 rt.block_on(async {
                     let store = Arc::new(InMemoryTaskStore::new()) as Arc<dyn TaskStore>;
                     let permissions =
@@ -409,14 +406,15 @@ mod tests {
                             format!(
                                 "Expected no unacknowledged tasks after poll, found {}",
                                 unacked.len()
-                            ).into()
+                            )
+                            .into(),
                         ));
                     }
 
                     Ok(())
                 })
-            },
-        ).unwrap();
+            })
+            .unwrap();
     }
 
     #[tokio::test]

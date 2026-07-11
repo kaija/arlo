@@ -78,9 +78,7 @@ impl Tool for GlobTool {
         // Run glob in a blocking task since it does filesystem I/O
         let matches = tokio::task::spawn_blocking(move || {
             glob::glob(&full_pattern)
-                .map_err(|e| {
-                    ToolError::InvalidInput(format!("Invalid glob pattern: {}", e))
-                })
+                .map_err(|e| ToolError::InvalidInput(format!("Invalid glob pattern: {}", e)))
                 .map(|entries| {
                     entries
                         .filter_map(|entry| entry.ok())
@@ -153,7 +151,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("sub")).await.unwrap();
         fs::write(dir.path().join("top.rs"), "a").await.unwrap();
-        fs::write(dir.path().join("sub/nested.rs"), "b").await.unwrap();
+        fs::write(dir.path().join("sub/nested.rs"), "b")
+            .await
+            .unwrap();
 
         let tool = GlobTool::new();
         let ctx = make_context_with_dir(dir.path());

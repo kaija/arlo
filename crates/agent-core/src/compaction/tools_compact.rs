@@ -22,11 +22,7 @@ use super::CompactionEvent;
 pub struct ToolsCompactLayer;
 
 impl CompactionLayer for ToolsCompactLayer {
-    fn apply(
-        &self,
-        messages: &mut Vec<Message>,
-        context: &CompactionContext,
-    ) -> LayerResult {
+    fn apply(&self, messages: &mut Vec<Message>, context: &CompactionContext) -> LayerResult {
         let config = &context.config;
 
         // Build a map of tool_use_id -> tool_name from Assistant messages.
@@ -53,8 +49,7 @@ impl CompactionLayer for ToolsCompactLayer {
             .filter(|m| matches!(m, Message::User { .. }))
             .count() as u32;
 
-        let exempt_start_turn =
-            total_user_msgs.saturating_sub(config.tools_compact_exempt_turns);
+        let exempt_start_turn = total_user_msgs.saturating_sub(config.tools_compact_exempt_turns);
 
         // If exempt_start_turn is 0, there are no old-enough messages to clear.
         if exempt_start_turn == 0 {
@@ -127,8 +122,10 @@ mod tests {
 
     /// Helper to create a default context for tests.
     fn test_context(exempt_turns: u32) -> CompactionContext {
-        let mut config = CompactionLayerConfig::default();
-        config.tools_compact_exempt_turns = exempt_turns;
+        let config = CompactionLayerConfig {
+            tools_compact_exempt_turns: exempt_turns,
+            ..Default::default()
+        };
         CompactionContext {
             token_count: 100_000,
             trigger_threshold: 80_000,
@@ -290,7 +287,7 @@ mod tests {
         {
             assert_eq!(tool_use_id, "my_tool_id");
             assert_eq!(content, "[content cleared]");
-            assert_eq!(*is_error, true);
+            assert!(*is_error);
         } else {
             panic!("Expected ToolResult at index 2");
         }
@@ -387,8 +384,7 @@ mod tests {
         use proptest::prelude::*;
 
         /// The compactable tool names used in tests (same as default config).
-        const COMPACTABLE_TOOLS: &[&str] =
-            &["file_read", "shell", "grep", "glob", "web_fetch"];
+        const COMPACTABLE_TOOLS: &[&str] = &["file_read", "shell", "grep", "glob", "web_fetch"];
         const NON_COMPACTABLE_TOOLS: &[&str] =
             &["custom_tool", "my_plugin", "special_op", "analyzer"];
 
@@ -416,37 +412,33 @@ mod tests {
 
         /// Strategy to generate a single turn with 0-3 tool calls.
         fn arb_turn(turn_index: usize) -> impl Strategy<Value = Turn> {
-            let tool_calls = prop::collection::vec(
-                (
-                    arb_tool_name(),
-                    arb_content(),
-                    proptest::bool::ANY,
-                ),
-                0..=3,
-            )
-            .prop_map(move |calls| {
-                calls
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (name, content, is_error))| {
-                        let id = format!("t_{}_{}", turn_index, i);
-                        (id, name, content, is_error)
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let tool_calls =
+                prop::collection::vec((arb_tool_name(), arb_content(), proptest::bool::ANY), 0..=3)
+                    .prop_map(move |calls| {
+                        calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (name, content, is_error))| {
+                                let id = format!("t_{}_{}", turn_index, i);
+                                (id, name, content, is_error)
+                            })
+                            .collect::<Vec<_>>()
+                    });
 
-            (Just(format!("User message turn {}", turn_index)), tool_calls).prop_map(
-                |(user_text, tool_calls)| Turn {
+            (
+                Just(format!("User message turn {}", turn_index)),
+                tool_calls,
+            )
+                .prop_map(|(user_text, tool_calls)| Turn {
                     user_text,
                     tool_calls,
-                },
-            )
+                })
         }
 
         /// Strategy to generate a conversation of 3-15 turns.
         fn arb_conversation() -> impl Strategy<Value = Vec<Turn>> {
             (3usize..=15).prop_flat_map(|num_turns| {
-                let strategies: Vec<_> = (0..num_turns).map(|i| arb_turn(i)).collect();
+                let strategies: Vec<_> = (0..num_turns).map(arb_turn).collect();
                 strategies
             })
         }

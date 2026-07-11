@@ -74,12 +74,7 @@ impl StreamingToolExecutor {
     /// Enqueue a tool for execution.
     ///
     /// The tool's concurrency classification is determined from the input.
-    pub fn enqueue(
-        &mut self,
-        tool_use: ToolUseBlock,
-        tool: Arc<dyn Tool>,
-        ctx: ToolContext,
-    ) {
+    pub fn enqueue(&mut self, tool_use: ToolUseBlock, tool: Arc<dyn Tool>, ctx: ToolContext) {
         let concurrency = tool.concurrency(&tool_use.input);
         let index = self.queue.len();
         self.queue.push(EnqueuedTool {
@@ -110,8 +105,7 @@ impl StreamingToolExecutor {
                 }
                 Concurrency::Exclusive => {
                     // Flush all pending safe tools first
-                    self.flush_safe_batch(&mut safe_batch, &semaphore)
-                        .await;
+                    self.flush_safe_batch(&mut safe_batch, &semaphore).await;
                     self.join_all_pending().await;
 
                     // Check cancellation before running exclusive tool
@@ -216,11 +210,9 @@ impl StreamingToolExecutor {
                 };
 
                 // If this tool cascades errors and it failed, cancel siblings
-                if error_cascades {
-                    if let Err(_) = &result {
-                        tracing::error!(tool_name = %tool_name, "tool_error_cascading");
-                        cancel.cancel();
-                    }
+                if error_cascades && result.is_err() {
+                    tracing::error!(tool_name = %tool_name, "tool_error_cascading");
+                    cancel.cancel();
                 }
 
                 if result.is_err() {
@@ -264,11 +256,9 @@ impl StreamingToolExecutor {
             }
         };
 
-        if error_cascades {
-            if let Err(_) = &result {
-                tracing::error!(tool_name = %tool_name_str, "tool_error_cascading");
-                self.cancel_token.cancel();
-            }
+        if error_cascades && result.is_err() {
+            tracing::error!(tool_name = %tool_name_str, "tool_error_cascading");
+            self.cancel_token.cancel();
         }
 
         if result.is_err() {
@@ -295,9 +285,7 @@ impl StreamingToolExecutor {
                         index: usize::MAX,
                         tool_use_id: String::new(),
                         tool_name: String::new(),
-                        result: Err(ToolError::ExecutionFailed(
-                            "Task panicked".to_string(),
-                        )),
+                        result: Err(ToolError::ExecutionFailed("Task panicked".to_string())),
                     });
                 }
             }
@@ -338,9 +326,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for SafeTool {
-        fn name(&self) -> &str { &self.tool_name }
-        fn description(&self) -> &str { "safe tool" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+        fn description(&self) -> &str {
+            "safe tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Safe
         }
@@ -361,9 +355,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for ExclusiveTool {
-        fn name(&self) -> &str { &self.tool_name }
-        fn description(&self) -> &str { "exclusive tool" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+        fn description(&self) -> &str {
+            "exclusive tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Exclusive
         }
@@ -381,19 +381,29 @@ mod tests {
 
     #[async_trait]
     impl Tool for CascadingFailTool {
-        fn name(&self) -> &str { "cascading_fail" }
-        fn description(&self) -> &str { "fails and cascades" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            "cascading_fail"
+        }
+        fn description(&self) -> &str {
+            "fails and cascades"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Safe
         }
-        fn error_cascades(&self) -> bool { true }
+        fn error_cascades(&self) -> bool {
+            true
+        }
         async fn execute(
             &self,
             _input: serde_json::Value,
             _ctx: &ToolContext,
         ) -> Result<ToolOutput, ToolError> {
-            Err(ToolError::ExecutionFailed("intentional failure".to_string()))
+            Err(ToolError::ExecutionFailed(
+                "intentional failure".to_string(),
+            ))
         }
     }
 
@@ -406,9 +416,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for SlowTool {
-        fn name(&self) -> &str { &self.tool_name }
-        fn description(&self) -> &str { "slow tool" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+        fn description(&self) -> &str {
+            "slow tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Safe
         }
@@ -432,13 +448,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for SlowCascadingFailTool {
-        fn name(&self) -> &str { "slow_cascade_fail" }
-        fn description(&self) -> &str { "slow fail cascading" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            "slow_cascade_fail"
+        }
+        fn description(&self) -> &str {
+            "slow fail cascading"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Safe
         }
-        fn error_cascades(&self) -> bool { true }
+        fn error_cascades(&self) -> bool {
+            true
+        }
         async fn execute(
             &self,
             _input: serde_json::Value,
@@ -500,9 +524,9 @@ mod tests {
         assert_eq!(results.len(), 4);
 
         // Results should be in enqueue order
-        for i in 0..4 {
-            assert_eq!(results[i].tool_use_id, format!("t{}", i));
-            assert_eq!(results[i].tool_name, format!("tool{}", i));
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.tool_use_id, format!("t{}", i));
+            assert_eq!(result.tool_name, format!("tool{}", i));
         }
     }
 
@@ -581,7 +605,11 @@ mod tests {
             counter: counter.clone(),
         });
 
-        exec.enqueue(make_tool_use("t_fail", "cascading_fail"), fail_tool, make_ctx());
+        exec.enqueue(
+            make_tool_use("t_fail", "cascading_fail"),
+            fail_tool,
+            make_ctx(),
+        );
         exec.enqueue(
             make_tool_use("t_slow", "slow_sibling"),
             slow_tool,
@@ -643,9 +671,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for ConcurrencyTrackingTool {
-        fn name(&self) -> &str { &self.tool_name }
-        fn description(&self) -> &str { "tracks concurrency" }
-        fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+        fn description(&self) -> &str {
+            "tracks concurrency"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
         fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
             Concurrency::Safe
         }
@@ -725,13 +759,21 @@ mod tests {
 
         #[async_trait]
         impl Tool for NonCascadingFailTool {
-            fn name(&self) -> &str { "non_cascade_fail" }
-            fn description(&self) -> &str { "fails without cascading" }
-            fn parameters_schema(&self) -> serde_json::Value { json!({"type": "object"}) }
+            fn name(&self) -> &str {
+                "non_cascade_fail"
+            }
+            fn description(&self) -> &str {
+                "fails without cascading"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
             fn concurrency(&self, _input: &serde_json::Value) -> Concurrency {
                 Concurrency::Safe
             }
-            fn error_cascades(&self) -> bool { false }
+            fn error_cascades(&self) -> bool {
+                false
+            }
             async fn execute(
                 &self,
                 _input: serde_json::Value,
@@ -747,7 +789,11 @@ mod tests {
             output: "still_works".to_string(),
         });
 
-        exec.enqueue(make_tool_use("t1", "non_cascade_fail"), fail_tool, make_ctx());
+        exec.enqueue(
+            make_tool_use("t1", "non_cascade_fail"),
+            fail_tool,
+            make_ctx(),
+        );
         exec.enqueue(make_tool_use("t2", "after_fail"), safe_tool, make_ctx());
 
         exec.execute_all().await;

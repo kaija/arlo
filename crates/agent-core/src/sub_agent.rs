@@ -50,12 +50,24 @@ pub struct SubAgentTool {
 impl SubAgentTool {
     /// Create a new SubAgentTool from a definition and parent config.
     pub fn new(def: SubAgentDef, config: RunConfig) -> Self {
-        Self { def, config, task_store: None }
+        Self {
+            def,
+            config,
+            task_store: None,
+        }
     }
 
     /// Create a SubAgentTool with task tracking enabled.
-    pub fn with_task_store(def: SubAgentDef, config: RunConfig, task_store: Arc<dyn TaskStore>) -> Self {
-        Self { def, config, task_store: Some(task_store) }
+    pub fn with_task_store(
+        def: SubAgentDef,
+        config: RunConfig,
+        task_store: Arc<dyn TaskStore>,
+    ) -> Self {
+        Self {
+            def,
+            config,
+            task_store: Some(task_store),
+        }
     }
 
     /// Build a RunConfig for the sub-agent, overriding max_turns if specified.
@@ -85,9 +97,7 @@ impl SubAgentTool {
         // delegated approval to be visible to all agents sharing this store.
         let shared_grants: Arc<tokio::sync::RwLock<Vec<crate::pattern::ToolPattern>>> =
             Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        config.permissions = config
-            .permissions
-            .with_shared_session_grants(shared_grants);
+        config.permissions = config.permissions.with_shared_session_grants(shared_grants);
 
         config
     }
@@ -302,7 +312,7 @@ impl Tool for SubAgentTool {
     }
 
     fn description(&self) -> &str {
-        self.def.tool_description.as_deref().unwrap_or_else(|| {
+        self.def.tool_description.as_deref().unwrap_or({
             // Can't dynamically format here since we return &str.
             // Use a static fallback.
             "Delegate a task to a specialized sub-agent"
@@ -465,9 +475,12 @@ mod tests {
             background,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .max_turns(25)
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .max_turns(25)
+        .build();
         SubAgentTool::new(def, config)
     }
 
@@ -496,8 +509,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         assert_eq!(tool.name(), "my-helper");
     }
@@ -520,8 +536,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         assert_eq!(
             tool.description(),
@@ -559,8 +578,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         assert_eq!(tool.parameters_schema(), custom_schema);
     }
@@ -603,9 +625,7 @@ mod tests {
     async fn sub_agent_tool_execute_foreground() {
         let tool = make_sub_agent_tool(false);
         let ctx = make_context();
-        let result = tool
-            .execute(json!({"task": "Do something"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": "Do something"}), &ctx).await;
         assert!(result.is_ok());
         match result.unwrap() {
             ToolOutput::Text(text) => {
@@ -619,9 +639,7 @@ mod tests {
     async fn sub_agent_tool_execute_background() {
         let tool = make_sub_agent_tool(true);
         let ctx = make_context();
-        let result = tool
-            .execute(json!({"task": "Background work"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"task": "Background work"}), &ctx).await;
         assert!(result.is_ok());
         match result.unwrap() {
             ToolOutput::Text(text) => {
@@ -665,17 +683,14 @@ mod tests {
 
         /// Strategy for generating arbitrary RunResult values.
         fn arb_run_result() -> impl Strategy<Value = RunResult> {
-            (arb_usage(), 0.0f64..100.0, 1u32..50)
-                .prop_map(|(usage, cost_usd, turns)| {
-                    RunResult {
-                        output: "sub-agent output".to_string(),
-                        structured: None,
-                        usage,
-                        cost_usd,
-                        turns,
-                        state: RunState::new("sub-run".to_string(), None, None),
-                    }
-                })
+            (arb_usage(), 0.0f64..100.0, 1u32..50).prop_map(|(usage, cost_usd, turns)| RunResult {
+                output: "sub-agent output".to_string(),
+                structured: None,
+                usage,
+                cost_usd,
+                turns,
+                state: RunState::new("sub-run".to_string(), None, None),
+            })
         }
 
         proptest! {
@@ -803,9 +818,12 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .max_turns(25)
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .max_turns(25)
+        .build();
         let tool = SubAgentTool::new(def, config);
         let sub_config = tool.sub_agent_config();
         // Should keep parent's max_turns
@@ -835,8 +853,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         let sub_config = tool.sub_agent_config();
 
@@ -853,7 +874,10 @@ mod tests {
         #[async_trait]
         impl ApprovalHandler for TestHandler {
             async fn request_approval(&self, ctx: &ApprovalContext) -> Vec<ApprovalResponse> {
-                ctx.pending.iter().map(|_| ApprovalResponse::Allow).collect()
+                ctx.pending
+                    .iter()
+                    .map(|_| ApprovalResponse::Allow)
+                    .collect()
             }
         }
 
@@ -870,17 +894,23 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .approval_handler(handler)
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .approval_handler(handler)
+        .build();
         let tool = SubAgentTool::new(def, config);
         let sub_config = tool.sub_agent_config();
 
         // The sub-agent should have the same Arc (pointer equality)
         assert!(sub_config.approval_handler.is_some());
-        let sub_handler_ptr = Arc::as_ptr(sub_config.approval_handler.as_ref().unwrap()) as *const ();
-        assert_eq!(handler_ptr, sub_handler_ptr,
-            "Sub-agent's approval_handler should be the same Arc as the parent's");
+        let sub_handler_ptr =
+            Arc::as_ptr(sub_config.approval_handler.as_ref().unwrap()) as *const ();
+        assert_eq!(
+            handler_ptr, sub_handler_ptr,
+            "Sub-agent's approval_handler should be the same Arc as the parent's"
+        );
     }
 
     #[test]
@@ -896,8 +926,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         let sub_config = tool.sub_agent_config();
 
@@ -921,8 +954,11 @@ mod tests {
             background: false,
             allowed_tools: None,
         };
-        let config = RunConfig::builder(Arc::new(MockModelProvider) as Arc<dyn ModelProvider>, "mock")
-            .build();
+        let config = RunConfig::builder(
+            Arc::new(MockModelProvider) as Arc<dyn ModelProvider>,
+            "mock",
+        )
+        .build();
         let tool = SubAgentTool::new(def, config);
         let sub_config = tool.sub_agent_config();
 

@@ -24,7 +24,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),              // output area
+            Constraint::Min(1),               // output area
             Constraint::Length(input_height), // input area / permission prompt
             Constraint::Length(1),            // status bar
         ])
@@ -52,9 +52,7 @@ fn span_style_to_ratatui(style: &SpanStyle) -> Style {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
         SpanStyle::ToolOutput => Style::default(),
-        SpanStyle::Error => Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+        SpanStyle::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         SpanStyle::Warning => Style::default().fg(Color::Yellow),
         SpanStyle::System => Style::default()
             .fg(Color::DarkGray)
@@ -103,16 +101,12 @@ fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let text = Text::from(lines);
 
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .title(" Output ");
+    let block = Block::default().borders(Borders::NONE).title(" Output ");
 
     // Use Paragraph::line_count() to get the exact number of visual lines
     // after word-wrapping. This matches the renderer's internal calculation
     // and avoids the naive character-width estimation drifting out of sync.
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
 
     let visible_height = area.height as usize;
     let total_visual_lines = paragraph.line_count(area.width);
@@ -131,9 +125,7 @@ fn render_output(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let input_content = state.input.content();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Input ");
+    let block = Block::default().borders(Borders::ALL).title(" Input ");
 
     let paragraph = Paragraph::new(input_content).block(block);
 
@@ -163,7 +155,10 @@ fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
         PermissionPromptState::AwaitingKey { selected } => {
             render_permission_awaiting_key(frame, state, *selected, area);
         }
-        PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+        PermissionPromptState::EditingPattern {
+            edit_buffer,
+            cursor,
+        } => {
             render_permission_editing_pattern(frame, edit_buffer, *cursor, area);
         }
     }
@@ -173,7 +168,12 @@ fn render_permission_prompt(frame: &mut Frame, state: &AppState, area: Rect) {
 ///
 /// Shows options as `▸ allow once | always | pattern | deny` with the selected
 /// option highlighted. User can navigate with ←/→ and confirm with Enter.
-fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, selected: usize, area: Rect) {
+fn render_permission_awaiting_key(
+    frame: &mut Frame,
+    state: &AppState,
+    selected: usize,
+    area: Rect,
+) {
     let (tool_name, input_summary) = if let Some(approval) = state.pending_approvals.first() {
         let name = approval.tool_name.clone();
         let input_str = approval.tool_input.to_string();
@@ -192,13 +192,21 @@ fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, selected:
     if let Some(ref agent_name) = state.approval_agent_name {
         tool_line_spans.push(Span::styled(
             format!("[sub-agent: {}] ", agent_name),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
     }
-    tool_line_spans.push(Span::styled("Tool: ", Style::default().add_modifier(Modifier::BOLD)));
+    tool_line_spans.push(Span::styled(
+        "Tool: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
     tool_line_spans.push(Span::styled(tool_name, Style::default().fg(Color::Yellow)));
     tool_line_spans.push(Span::raw("  Input: "));
-    tool_line_spans.push(Span::styled(input_summary, Style::default().fg(Color::DarkGray)));
+    tool_line_spans.push(Span::styled(
+        input_summary,
+        Style::default().fg(Color::DarkGray),
+    ));
 
     // Build the selectable options line with highlight on the selected item
     let options: &[(&str, &str, Color)] = &[
@@ -238,12 +246,12 @@ fn render_permission_awaiting_key(frame: &mut Frame, state: &AppState, selected:
     }
 
     option_spans.push(Span::styled(" ▸", Style::default().fg(Color::DarkGray)));
-    option_spans.push(Span::styled("  ⏎ Enter", Style::default().fg(Color::DarkGray)));
+    option_spans.push(Span::styled(
+        "  ⏎ Enter",
+        Style::default().fg(Color::DarkGray),
+    ));
 
-    let lines = vec![
-        Line::from(tool_line_spans),
-        Line::from(option_spans),
-    ];
+    let lines = vec![Line::from(tool_line_spans), Line::from(option_spans)];
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -270,9 +278,17 @@ fn render_permission_editing_pattern(
             Span::styled(edit_buffer, Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
-            Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" confirm  "),
-            Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" cancel"),
         ]),
     ];
@@ -299,9 +315,7 @@ fn render_permission_editing_pattern(
 /// Uses `tokio::task::block_in_place` with the current runtime handle to avoid
 /// blocking the async executor.
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(f)
-    })
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 /// Render the status bar showing mode indicator, activity status, and token usage.
@@ -370,10 +384,7 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
         };
 
         // Spinner
-        spans.push(Span::styled(
-            spinner,
-            Style::default().fg(activity_color),
-        ));
+        spans.push(Span::styled(spinner, Style::default().fg(activity_color)));
         spans.push(Span::raw(" "));
 
         // Activity label (with tool name if executing)
@@ -413,7 +424,10 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     // Token usage (always shown if available)
     if let Some(usage) = &state.last_usage {
         spans.push(Span::styled(
-            format!("  tokens: {}in / {}out", usage.input_tokens, usage.output_tokens),
+            format!(
+                "  tokens: {}in / {}out",
+                usage.input_tokens, usage.output_tokens
+            ),
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -469,8 +483,7 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let status_line = Line::from(spans);
 
-    let paragraph = Paragraph::new(status_line)
-        .style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(status_line).style(Style::default().bg(Color::Black));
 
     frame.render_widget(paragraph, area);
 }
@@ -489,7 +502,9 @@ fn cursor_byte_to_column(content: &str, byte_pos: usize) -> usize {
 /// Control characters count as 0.
 fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
-    s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+    s.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
 }
 
 #[cfg(test)]
@@ -558,9 +573,9 @@ mod tests {
         // "あいう" — each char is 3 bytes, 2 display columns (CJK wide)
         let s = "あいう";
         assert_eq!(cursor_byte_to_column(s, 0), 0);
-        assert_eq!(cursor_byte_to_column(s, 3), 2);  // after 'あ' = 2 cols
-        assert_eq!(cursor_byte_to_column(s, 6), 4);  // after 'い' = 4 cols
-        assert_eq!(cursor_byte_to_column(s, 9), 6);  // after 'う' = 6 cols
+        assert_eq!(cursor_byte_to_column(s, 3), 2); // after 'あ' = 2 cols
+        assert_eq!(cursor_byte_to_column(s, 6), 4); // after 'い' = 4 cols
+        assert_eq!(cursor_byte_to_column(s, 9), 6); // after 'う' = 6 cols
     }
 
     #[test]
@@ -569,8 +584,14 @@ mod tests {
         use super::super::app::{OutputSpan, SpanStyle};
 
         let spans = vec![
-            OutputSpan { text: "hello\nworld\n".to_string(), style: SpanStyle::Normal },
-            OutputSpan { text: "foo".to_string(), style: SpanStyle::Normal },
+            OutputSpan {
+                text: "hello\nworld\n".to_string(),
+                style: SpanStyle::Normal,
+            },
+            OutputSpan {
+                text: "foo".to_string(),
+                style: SpanStyle::Normal,
+            },
         ];
 
         // Simulate the splitting logic

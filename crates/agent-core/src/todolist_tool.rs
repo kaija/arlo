@@ -140,14 +140,11 @@ impl TodoListTool {
     }
 
     async fn handle_update(&self, input: &serde_json::Value) -> Result<ToolOutput, ToolError> {
-        let id = input
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "Missing required parameter 'id' for action 'update'".to_string(),
-                )
-            })?;
+        let id = input.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            ToolError::InvalidInput(
+                "Missing required parameter 'id' for action 'update'".to_string(),
+            )
+        })?;
 
         let status_str = input
             .get("status")
@@ -197,14 +194,11 @@ impl TodoListTool {
     }
 
     async fn handle_remove(&self, input: &serde_json::Value) -> Result<ToolOutput, ToolError> {
-        let id = input
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "Missing required parameter 'id' for action 'remove'".to_string(),
-                )
-            })?;
+        let id = input.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            ToolError::InvalidInput(
+                "Missing required parameter 'id' for action 'remove'".to_string(),
+            )
+        })?;
 
         self.store.remove_todo(id).await.map_err(map_store_error)?;
 
@@ -274,23 +268,17 @@ mod tests {
 
     /// Generate valid content strings (1..=1000 chars, non-empty printable ASCII).
     fn content_strategy() -> impl Strategy<Value = String> {
-        proptest::string::string_regex("[a-zA-Z0-9 _.,-]{1,1000}")
-            .unwrap()
+        proptest::string::string_regex("[a-zA-Z0-9 _.,-]{1,1000}").unwrap()
     }
 
     /// Generate valid active_form strings (1..=200 chars).
     fn active_form_strategy() -> impl Strategy<Value = String> {
-        proptest::string::string_regex("[a-zA-Z0-9 _.,-]{1,200}")
-            .unwrap()
+        proptest::string::string_regex("[a-zA-Z0-9 _.,-]{1,200}").unwrap()
     }
 
     /// Generate a valid todo status string.
     fn status_str_strategy() -> impl Strategy<Value = &'static str> {
-        prop_oneof![
-            Just("pending"),
-            Just("in_progress"),
-            Just("completed"),
-        ]
+        prop_oneof![Just("pending"), Just("in_progress"), Just("completed"),]
     }
 
     /// Generate an invalid action string (not one of the valid actions).
@@ -298,14 +286,16 @@ mod tests {
         proptest::string::string_regex("[a-z]{1,20}")
             .unwrap()
             .prop_filter("must not be a valid action", |s| {
-                !matches!(s.as_str(), "add" | "update" | "list" | "remove" | "clear_completed")
+                !matches!(
+                    s.as_str(),
+                    "add" | "update" | "list" | "remove" | "clear_completed"
+                )
             })
     }
 
     /// Generate a non-existent ID string (UUID-like but guaranteed not in store).
     fn nonexistent_id_strategy() -> impl Strategy<Value = String> {
-        proptest::string::string_regex("missing-[a-f0-9]{8}")
-            .unwrap()
+        proptest::string::string_regex("missing-[a-f0-9]{8}").unwrap()
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -853,10 +843,7 @@ mod tests {
         let tool = TodoListTool::new(store.clone());
         let ctx = make_context();
 
-        let id = store
-            .add_todo("item".to_string(), None)
-            .await
-            .unwrap();
+        let id = store.add_todo("item".to_string(), None).await.unwrap();
 
         let result = tool
             .execute(
@@ -912,10 +899,7 @@ mod tests {
         let tool = TodoListTool::new(store.clone());
         let ctx = make_context();
 
-        let id = store
-            .add_todo("item".to_string(), None)
-            .await
-            .unwrap();
+        let id = store.add_todo("item".to_string(), None).await.unwrap();
 
         let result = tool
             .execute(
@@ -967,8 +951,7 @@ mod tests {
         let result = tool.execute(json!({"action": "list"}), &ctx).await.unwrap();
         match result {
             ToolOutput::Text(json_str) => {
-                let items: Vec<serde_json::Value> =
-                    serde_json::from_str(&json_str).unwrap();
+                let items: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0]["content"], "first");
                 assert_eq!(items[1]["content"], "second");
@@ -985,8 +968,7 @@ mod tests {
         let result = tool.execute(json!({"action": "list"}), &ctx).await.unwrap();
         match result {
             ToolOutput::Text(json_str) => {
-                let items: Vec<serde_json::Value> =
-                    serde_json::from_str(&json_str).unwrap();
+                let items: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
                 assert_eq!(items.len(), 0);
             }
             other => panic!("Expected Text, got {:?}", other),
@@ -999,10 +981,7 @@ mod tests {
         let tool = TodoListTool::new(store.clone());
         let ctx = make_context();
 
-        let id = store
-            .add_todo("to remove".to_string(), None)
-            .await
-            .unwrap();
+        let id = store.add_todo("to remove".to_string(), None).await.unwrap();
 
         let result = tool
             .execute(json!({"action": "remove", "id": id}), &ctx)
@@ -1074,9 +1053,7 @@ mod tests {
     async fn unknown_action_returns_error() {
         let tool = TodoListTool::new(make_store());
         let ctx = make_context();
-        let result = tool
-            .execute(json!({"action": "destroy"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"action": "destroy"}), &ctx).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             ToolError::InvalidInput(msg) => {

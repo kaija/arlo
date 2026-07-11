@@ -68,13 +68,12 @@ pub fn collapse(doc: &Html) -> CollapsedDocument {
 
                 // Step 2: Strip leading space if previous context ends with space
                 // or if this text follows a block boundary
-                let stripped_leading = if prev_ended_with_space
-                    || prev_sibling_is_block(node_id, doc)
-                {
-                    collapsed.strip_prefix(' ').unwrap_or(&collapsed)
-                } else {
-                    &collapsed
-                };
+                let stripped_leading =
+                    if prev_ended_with_space || prev_sibling_is_block(node_id, doc) {
+                        collapsed.strip_prefix(' ').unwrap_or(&collapsed)
+                    } else {
+                        &collapsed
+                    };
 
                 // Step 3: Strip trailing space if next sibling is a block element
                 let stripped = if next_sibling_is_block(node_id, doc) {
@@ -227,7 +226,7 @@ mod tests {
 
         // Find the text node and verify it was collapsed
         let mut found = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.contains("Hello") {
                 assert_eq!(text, "Hello world");
                 found = true;
@@ -244,7 +243,7 @@ mod tests {
 
         // Text inside pre should be preserved verbatim
         let mut found = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.contains("hello") {
                 assert_eq!(text, "  hello\n  world  ");
                 found = true;
@@ -261,7 +260,7 @@ mod tests {
 
         // " world" follows a <p> (block), so leading space should be stripped
         let mut found_world = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.contains("world") {
                 assert_eq!(text, "world");
                 found_world = true;
@@ -278,7 +277,7 @@ mod tests {
 
         // "hello " precedes a <p> (block), so trailing space should be stripped
         let mut found_hello = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.contains("hello") {
                 assert_eq!(text, "hello");
                 found_hello = true;
@@ -296,7 +295,7 @@ mod tests {
         // Text that becomes empty after collapsing should not appear
         // The original "   " collapses to " ", then leading space gets stripped
         // (because it follows a block <p>), leaving empty string
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             assert!(
                 !text.is_empty(),
                 "Empty text should not be stored in collapsed document"
@@ -323,7 +322,7 @@ mod tests {
 
         // At least one text node should be retrievable
         let mut found = false;
-        for (id, _) in &collapsed.texts {
+        for id in collapsed.texts.keys() {
             if let Some(text) = collapsed.get_text(*id) {
                 if text == "Hello world" {
                     found = true;
@@ -349,7 +348,7 @@ mod tests {
 
         // "   " between inline spans should collapse to single space
         let mut found_space = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.trim().is_empty() && !text.is_empty() {
                 // Should be a single space
                 assert_eq!(text, " ");
@@ -399,7 +398,7 @@ mod tests {
         let collapsed = collapse(&doc);
 
         let mut found = false;
-        for (_, text) in &collapsed.texts {
+        for text in collapsed.texts.values() {
             if text.contains("hello") {
                 assert_eq!(text, "hello world");
                 found = true;

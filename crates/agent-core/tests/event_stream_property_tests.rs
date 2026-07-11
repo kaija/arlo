@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 
-use agent_core::{
-    Agent, ContentBlock, Input, Instructions, Message, Model, ModelError, ModelProvider,
-    ModelRequest, ModelResponse, ModelStream, RunConfig, RunEvent, StopReason, StreamChunk,
-    Tool, ToolContext, ToolOutput, Usage, run_stream,
-};
 use agent_core::tool::Concurrency;
+use agent_core::{
+    run_stream, Agent, ContentBlock, Input, Instructions, Message, Model, ModelError,
+    ModelProvider, ModelRequest, ModelResponse, ModelStream, RunConfig, RunEvent, StopReason,
+    StreamChunk, Tool, ToolContext, ToolOutput, Usage,
+};
 
 // --- Helper: terminal event detection ---
 
@@ -81,13 +81,27 @@ impl Model for SimpleTextModel {
         unimplemented!()
     }
 
-    fn name(&self) -> &str { "simple-text-model" }
-    fn provider(&self) -> &str { "mock" }
-    fn context_window(&self) -> usize { 128000 }
-    fn max_output_tokens(&self) -> usize { 4096 }
-    fn supports_tools(&self) -> bool { false }
-    fn input_cost_per_million(&self) -> f64 { 3.0 }
-    fn output_cost_per_million(&self) -> f64 { 15.0 }
+    fn name(&self) -> &str {
+        "simple-text-model"
+    }
+    fn provider(&self) -> &str {
+        "mock"
+    }
+    fn context_window(&self) -> usize {
+        128000
+    }
+    fn max_output_tokens(&self) -> usize {
+        4096
+    }
+    fn supports_tools(&self) -> bool {
+        false
+    }
+    fn input_cost_per_million(&self) -> f64 {
+        3.0
+    }
+    fn output_cost_per_million(&self) -> f64 {
+        15.0
+    }
 }
 
 /// A mock model that calls a tool on the first invocation, then returns text.
@@ -97,9 +111,10 @@ struct SingleToolCallModel;
 impl Model for SingleToolCallModel {
     async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelError> {
         // If there are tool results in messages, respond with final text
-        let has_tool_result = request.messages.iter().any(|m| {
-            matches!(m, Message::ToolResult { .. })
-        });
+        let has_tool_result = request
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult { .. }));
 
         if has_tool_result {
             let chunks = vec![
@@ -148,13 +163,27 @@ impl Model for SingleToolCallModel {
         unimplemented!()
     }
 
-    fn name(&self) -> &str { "single-tool-model" }
-    fn provider(&self) -> &str { "mock" }
-    fn context_window(&self) -> usize { 128000 }
-    fn max_output_tokens(&self) -> usize { 4096 }
-    fn supports_tools(&self) -> bool { true }
-    fn input_cost_per_million(&self) -> f64 { 3.0 }
-    fn output_cost_per_million(&self) -> f64 { 15.0 }
+    fn name(&self) -> &str {
+        "single-tool-model"
+    }
+    fn provider(&self) -> &str {
+        "mock"
+    }
+    fn context_window(&self) -> usize {
+        128000
+    }
+    fn max_output_tokens(&self) -> usize {
+        4096
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn input_cost_per_million(&self) -> f64 {
+        3.0
+    }
+    fn output_cost_per_million(&self) -> f64 {
+        15.0
+    }
 }
 
 /// A model that always calls tools (never emits final text) — used to trigger max turns.
@@ -173,7 +202,9 @@ impl AlwaysToolCallModel {
 #[async_trait]
 impl Model for AlwaysToolCallModel {
     async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-        let n = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tool_id = format!("tool_{}", n);
         let tool_id2 = tool_id.clone();
         let chunks = vec![
@@ -201,13 +232,27 @@ impl Model for AlwaysToolCallModel {
         unimplemented!()
     }
 
-    fn name(&self) -> &str { "always-tool-model" }
-    fn provider(&self) -> &str { "mock" }
-    fn context_window(&self) -> usize { 128000 }
-    fn max_output_tokens(&self) -> usize { 4096 }
-    fn supports_tools(&self) -> bool { true }
-    fn input_cost_per_million(&self) -> f64 { 3.0 }
-    fn output_cost_per_million(&self) -> f64 { 15.0 }
+    fn name(&self) -> &str {
+        "always-tool-model"
+    }
+    fn provider(&self) -> &str {
+        "mock"
+    }
+    fn context_window(&self) -> usize {
+        128000
+    }
+    fn max_output_tokens(&self) -> usize {
+        4096
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn input_cost_per_million(&self) -> f64 {
+        3.0
+    }
+    fn output_cost_per_million(&self) -> f64 {
+        15.0
+    }
 }
 
 /// A model that returns an error on stream.
@@ -216,20 +261,36 @@ struct ErrorModel;
 #[async_trait]
 impl Model for ErrorModel {
     async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-        Err(ModelError::Connection("simulated connection failure".to_string()))
+        Err(ModelError::Connection(
+            "simulated connection failure".to_string(),
+        ))
     }
 
     async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
         unimplemented!()
     }
 
-    fn name(&self) -> &str { "error-model" }
-    fn provider(&self) -> &str { "mock" }
-    fn context_window(&self) -> usize { 128000 }
-    fn max_output_tokens(&self) -> usize { 4096 }
-    fn supports_tools(&self) -> bool { true }
-    fn input_cost_per_million(&self) -> f64 { 3.0 }
-    fn output_cost_per_million(&self) -> f64 { 15.0 }
+    fn name(&self) -> &str {
+        "error-model"
+    }
+    fn provider(&self) -> &str {
+        "mock"
+    }
+    fn context_window(&self) -> usize {
+        128000
+    }
+    fn max_output_tokens(&self) -> usize {
+        4096
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn input_cost_per_million(&self) -> f64 {
+        3.0
+    }
+    fn output_cost_per_million(&self) -> f64 {
+        15.0
+    }
 }
 
 /// A model that triggers budget exceeded by returning enormous usage.
@@ -258,13 +319,27 @@ impl Model for BudgetBustingModel {
         unimplemented!()
     }
 
-    fn name(&self) -> &str { "budget-busting-model" }
-    fn provider(&self) -> &str { "mock" }
-    fn context_window(&self) -> usize { 128000 }
-    fn max_output_tokens(&self) -> usize { 4096 }
-    fn supports_tools(&self) -> bool { true }
-    fn input_cost_per_million(&self) -> f64 { 100.0 }
-    fn output_cost_per_million(&self) -> f64 { 300.0 }
+    fn name(&self) -> &str {
+        "budget-busting-model"
+    }
+    fn provider(&self) -> &str {
+        "mock"
+    }
+    fn context_window(&self) -> usize {
+        128000
+    }
+    fn max_output_tokens(&self) -> usize {
+        4096
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn input_cost_per_million(&self) -> f64 {
+        100.0
+    }
+    fn output_cost_per_million(&self) -> f64 {
+        300.0
+    }
 }
 
 /// A mock provider that returns a given model.
@@ -287,8 +362,12 @@ struct EchoTool;
 
 #[async_trait]
 impl Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echoes input text" }
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echoes input text"
+    }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({"type": "object", "properties": {"text": {"type": "string"}}})
     }
@@ -341,7 +420,8 @@ fn assert_event_stream_well_formed(events: &[RunEvent]) {
             assert!(
                 !is_terminal_event(event),
                 "Terminal event found at position {} (not last). Event: {:?}",
-                i, event
+                i,
+                event
             );
         }
     }
@@ -356,7 +436,8 @@ fn assert_event_stream_well_formed(events: &[RunEvent]) {
             assert!(
                 started_tool_ids.contains(&id.to_string()),
                 "ToolEnd for id '{}' without preceding ToolStart. Events: {:?}",
-                id, events
+                id,
+                events
             );
         }
     }
@@ -436,9 +517,7 @@ async fn test_event_stream_max_turns_reached() {
         .tool(tool)
         .max_turns(2)
         .build();
-    let config = RunConfig::builder(provider, "mock")
-        .max_turns(2)
-        .build();
+    let config = RunConfig::builder(provider, "mock").max_turns(2).build();
     let input = Input::Fresh {
         prompt: "Do work".to_string(),
     };

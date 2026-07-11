@@ -5,8 +5,11 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use agent_core::{ApprovalResponse, ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent, StreamChunk, TaskStore};
 use agent_core::pattern::extract_primary_arg;
+use agent_core::{
+    ApprovalResponse, ContentBlock, Message, PendingApproval, PermissionEngine, RunEvent,
+    StreamChunk, TaskStore,
+};
 
 use super::approval::ApprovalRequest;
 use super::input::InputBuffer;
@@ -510,11 +513,12 @@ impl AppState {
             }
             // Enter confirms the currently selected option
             KeyCode::Enter => {
-                let selected = if let PermissionPromptState::AwaitingKey { selected } = self.prompt_state {
-                    selected
-                } else {
-                    0
-                };
+                let selected =
+                    if let PermissionPromptState::AwaitingKey { selected } = self.prompt_state {
+                        selected
+                    } else {
+                        0
+                    };
                 match selected {
                     0 => self.execute_allow(),
                     1 => self.execute_always(),
@@ -610,9 +614,10 @@ impl AppState {
         // We need to extract mutable references to the edit_buffer and cursor.
         // Use a temporary to avoid borrow conflicts with self.
         let (edit_buffer, cursor) = match &mut self.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
-                (edit_buffer, cursor)
-            }
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => (edit_buffer, cursor),
             _ => return UpdateResult::Continue,
         };
 
@@ -773,11 +778,7 @@ impl AppState {
                 self.approval_agent_name = None;
             }
 
-            RunEvent::AgentEnd {
-                output,
-                usage,
-                ..
-            } => {
+            RunEvent::AgentEnd { output, usage, .. } => {
                 // Append assistant response to conversation history
                 self.history.push(Message::Assistant {
                     content: vec![ContentBlock::Text { text: output }],
@@ -873,7 +874,10 @@ mod tests {
     #[test]
     fn update_resize_returns_continue() {
         let mut state = make_state();
-        assert_eq!(state.update(AppEvent::Resize(80, 24)), UpdateResult::Continue);
+        assert_eq!(
+            state.update(AppEvent::Resize(80, 24)),
+            UpdateResult::Continue
+        );
     }
 
     #[test]
@@ -1047,7 +1051,10 @@ mod tests {
             reason: "user cancelled".to_string(),
         }));
         assert_eq!(state.mode, AppMode::Idle);
-        assert_eq!(state.output_buffer.last().unwrap().style, SpanStyle::Warning);
+        assert_eq!(
+            state.output_buffer.last().unwrap().style,
+            SpanStyle::Warning
+        );
     }
 
     #[test]
@@ -1056,7 +1063,10 @@ mod tests {
         state.update(AppEvent::AgentEvent(RunEvent::MaxTurns { count: 25 }));
         assert_eq!(state.mode, AppMode::Idle);
         assert!(state.output_buffer.last().unwrap().text.contains("25"));
-        assert_eq!(state.output_buffer.last().unwrap().style, SpanStyle::Warning);
+        assert_eq!(
+            state.output_buffer.last().unwrap().style,
+            SpanStyle::Warning
+        );
     }
 
     #[test]
@@ -1074,7 +1084,10 @@ mod tests {
             .unwrap()
             .text
             .contains("blocked content"));
-        assert_eq!(state.output_buffer.last().unwrap().style, SpanStyle::Warning);
+        assert_eq!(
+            state.output_buffer.last().unwrap().style,
+            SpanStyle::Warning
+        );
     }
 
     #[test]
@@ -1087,7 +1100,6 @@ mod tests {
         assert!(state.output_buffer.is_empty());
         assert_eq!(state.mode, AppMode::Running);
     }
-
 
     #[test]
     fn compaction_is_ignored() {
@@ -1308,10 +1320,13 @@ mod tests {
 #[cfg(test)]
 mod property_tests {
     use super::*;
-    use agent_core::{ApprovalRequirement, PendingApproval, PermissionDecision, PermissionMode, RunEvent, StreamChunk, Usage};
+    use agent_core::{
+        ApprovalRequirement, PendingApproval, PermissionDecision, PermissionMode, RunEvent,
+        StreamChunk, Usage,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use proptest::prelude::*;
     use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
     use std::time::{Duration, Instant};
 
     fn make_state() -> AppState {
@@ -1321,9 +1336,9 @@ mod property_tests {
         state
     }
 
-    /// Property 1: Text delta ordering invariant
-    /// A sequence of TextDelta events produces output_buffer entries in identical order.
-    /// **Validates: Requirements 1.5**
+    // Property 1: Text delta ordering invariant
+    // A sequence of TextDelta events produces output_buffer entries in identical order.
+    // **Validates: Requirements 1.5**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1364,15 +1379,14 @@ mod property_tests {
             "[a-z]{1,50}".prop_map(|error| RunEvent::Error { error }),
             "[a-z]{1,50}".prop_map(|reason| RunEvent::Aborted { reason }),
             (1u32..100).prop_map(|count| RunEvent::MaxTurns { count }),
-            ("[a-z]{1,20}", "[a-z]{1,50}").prop_map(|(name, reason)| {
-                RunEvent::GuardrailTripped { name, reason }
-            }),
+            ("[a-z]{1,20}", "[a-z]{1,50}")
+                .prop_map(|(name, reason)| { RunEvent::GuardrailTripped { name, reason } }),
         ]
     }
 
-    /// Property 2: Terminal event state transition
-    /// All terminal RunEvent variants transition Running → Idle.
-    /// **Validates: Requirements 7.1-7.5**
+    // Property 2: Terminal event state transition
+    // All terminal RunEvent variants transition Running → Idle.
+    // **Validates: Requirements 7.1-7.5**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1386,9 +1400,9 @@ mod property_tests {
         }
     }
 
-    /// Property 3: Tool lifecycle correlation
-    /// ToolStart + ToolEnd pair produces Completed entry with correct output/is_error.
-    /// **Validates: Requirements 2.2, 2.3**
+    // Property 3: Tool lifecycle correlation
+    // ToolStart + ToolEnd pair produces Completed entry with correct output/is_error.
+    // **Validates: Requirements 2.2, 2.3**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1421,9 +1435,9 @@ mod property_tests {
         }
     }
 
-    /// Property 4: Tool executing state invariant
-    /// ToolStart without ToolEnd keeps status as Executing.
-    /// **Validates: Requirements 2.5**
+    // Property 4: Tool executing state invariant
+    // ToolStart without ToolEnd keeps status as Executing.
+    // **Validates: Requirements 2.5**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1449,9 +1463,9 @@ mod property_tests {
         }
     }
 
-    /// Property 5: Interruption populates permission prompt
-    /// Interruption with N items → PermissionPrompt mode + N pending_approvals.
-    /// **Validates: Requirements 3.1**
+    // Property 5: Interruption populates permission prompt
+    // Interruption with N items → PermissionPrompt mode + N pending_approvals.
+    // **Validates: Requirements 3.1**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1483,9 +1497,9 @@ mod property_tests {
         }
     }
 
-    /// Property 6: Permission prompt input filtering
-    /// Non-y/a/n keys produce Continue without state change.
-    /// **Validates: Requirements 3.5**
+    // Property 6: Permission prompt input filtering
+    // Non-y/a/n keys produce Continue without state change.
+    // **Validates: Requirements 3.5**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1578,9 +1592,9 @@ mod property_tests {
         assert!(state.last_ctrl_c.unwrap().elapsed() < Duration::from_millis(100));
     }
 
-    /// Property 10: Ctrl-C in running state aborts without exit
-    /// Single Ctrl-C in Running → AbortRun, never Exit.
-    /// **Validates: Requirements 6.1**
+    // Property 10: Ctrl-C in running state aborts without exit
+    // Single Ctrl-C in Running → AbortRun, never Exit.
+    // **Validates: Requirements 6.1**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(50))]
         #[test]
@@ -1603,9 +1617,9 @@ mod property_tests {
         }
     }
 
-    /// Property 11: Ctrl-C in idle state clears input
-    /// Ctrl-C in Idle with non-empty input → clears buffer, stays Idle.
-    /// **Validates: Requirements 6.3**
+    // Property 11: Ctrl-C in idle state clears input
+    // Ctrl-C in Idle with non-empty input → clears buffer, stays Idle.
+    // **Validates: Requirements 6.3**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1649,9 +1663,9 @@ mod property_tests {
         ]
     }
 
-    /// Property 12: Running state blocks submission
-    /// No key in Running mode produces StartRun.
-    /// **Validates: Requirements 8.4**
+    // Property 12: Running state blocks submission
+    // No key in Running mode produces StartRun.
+    // **Validates: Requirements 8.4**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1673,10 +1687,10 @@ mod property_tests {
         }
     }
 
-    /// Property 8: Conversation history accumulation
-    /// N completed cycles → 2N messages in history.
-    /// Each AgentEnd appends one Assistant message. Each StartRun prepends one User message (done externally in mod.rs).
-    /// **Validates: Requirements 5.1, 5.2**
+    // Property 8: Conversation history accumulation
+    // N completed cycles → 2N messages in history.
+    // Each AgentEnd appends one Assistant message. Each StartRun prepends one User message (done externally in mod.rs).
+    // **Validates: Requirements 5.1, 5.2**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(50))]
         #[test]
@@ -1740,10 +1754,10 @@ mod property_tests {
         }
     }
 
-    /// Property 7: Session allow persistence and semantics
-    /// After pressing 'a' at the permission prompt, subsequent PermissionEngine::check()
-    /// calls for that tool name return Allow (via session_allow).
-    /// **Validates: Requirements 3.3, 4.1, 4.2, 4.3**
+    // Property 7: Session allow persistence and semantics
+    // After pressing 'a' at the permission prompt, subsequent PermissionEngine::check()
+    // calls for that tool name return Allow (via session_allow).
+    // **Validates: Requirements 3.3, 4.1, 4.2, 4.3**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -1936,7 +1950,7 @@ mod suggest_pattern_tests {
         for (tool_name, tool_input) in cases {
             let suggestion = suggest_pattern(tool_name, &tool_input);
             let pattern = agent_core::pattern::ToolPattern::parse(&suggestion)
-                .expect(&format!("Failed to parse suggestion: {}", suggestion));
+                .unwrap_or_else(|| panic!("Failed to parse suggestion: {}", suggestion));
             assert!(
                 pattern.matches(tool_name, Some(&tool_input)),
                 "Suggested pattern '{}' does not match original call ({}, {:?})",
@@ -1962,7 +1976,10 @@ mod suggest_pattern_tests {
     fn prompt_state_defaults_to_awaiting_key() {
         let perms = PermissionEngine::new(agent_core::PermissionMode::Normal);
         let state = AppState::new(perms, None);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
     }
 
     #[test]
@@ -1984,7 +2001,10 @@ mod suggest_pattern_tests {
         state.update(AppEvent::AgentEvent(RunEvent::Interruption { pending }));
 
         assert_eq!(state.mode, AppMode::PermissionPrompt);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
     }
 
     #[test]
@@ -2009,7 +2029,10 @@ mod suggest_pattern_tests {
         state.update(AppEvent::ApprovalEvent(request));
 
         assert_eq!(state.mode, AppMode::PermissionPrompt);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
     }
 
     #[test]
@@ -2029,7 +2052,10 @@ mod suggest_pattern_tests {
         let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         state.update(AppEvent::Key(key));
 
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
         assert_eq!(state.mode, AppMode::Running);
     }
 }
@@ -2094,11 +2120,13 @@ mod suggest_pattern_property_tests {
 
         for (tool_name, tool_input) in &cases {
             let suggested = suggest_pattern(tool_name, tool_input);
-            let pattern = agent_core::pattern::ToolPattern::parse(&suggested)
-                .expect(&format!(
-                    "suggest_pattern should produce a parseable pattern, got '{}'",
-                    suggested
-                ));
+            let pattern =
+                agent_core::pattern::ToolPattern::parse(&suggested).unwrap_or_else(|| {
+                    panic!(
+                        "suggest_pattern should produce a parseable pattern, got '{}'",
+                        suggested
+                    )
+                });
             // For bare patterns (no primary arg), the pattern matches on tool name alone
             assert!(
                 pattern.matches(tool_name, Some(tool_input)),
@@ -2114,8 +2142,8 @@ mod suggest_pattern_property_tests {
 #[cfg(test)]
 mod p_key_handler_tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use agent_core::{ApprovalResponse, PendingApproval, PermissionEngine, PermissionMode};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::json;
 
     fn make_prompt_state_with_tool(tool_name: &str, tool_input: serde_json::Value) -> AppState {
@@ -2135,13 +2163,17 @@ mod p_key_handler_tests {
 
     #[test]
     fn p_key_transitions_to_editing_pattern() {
-        let mut state = make_prompt_state_with_tool("Bash", json!({"command": "npm install lodash"}));
+        let mut state =
+            make_prompt_state_with_tool("Bash", json!({"command": "npm install lodash"}));
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         let result = state.update(AppEvent::Key(key));
 
         assert_eq!(result, UpdateResult::Continue);
         match &state.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => {
                 assert_eq!(edit_buffer, "Bash(npm*)");
                 assert_eq!(*cursor, "Bash(npm*)".len());
             }
@@ -2161,7 +2193,10 @@ mod p_key_handler_tests {
         let result = state.update(AppEvent::Key(key));
 
         assert_eq!(result, UpdateResult::Continue);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
     }
 
     // --- EditingPattern: Enter confirms and resolves ---
@@ -2180,7 +2215,10 @@ mod p_key_handler_tests {
         let result = state.update(AppEvent::Key(key_enter));
 
         assert_eq!(result, UpdateResult::ResumeRun(true));
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
         assert!(state.pending_approvals.is_empty());
     }
 
@@ -2220,14 +2258,20 @@ mod p_key_handler_tests {
         // Press 'p' to enter editing mode
         let key_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         state.update(AppEvent::Key(key_p));
-        assert!(matches!(state.prompt_state, PermissionPromptState::EditingPattern { .. }));
+        assert!(matches!(
+            state.prompt_state,
+            PermissionPromptState::EditingPattern { .. }
+        ));
 
         // Press Esc to cancel
         let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let result = state.update(AppEvent::Key(key_esc));
 
         assert_eq!(result, UpdateResult::Continue);
-        assert_eq!(state.prompt_state, PermissionPromptState::AwaitingKey { selected: 0 });
+        assert_eq!(
+            state.prompt_state,
+            PermissionPromptState::AwaitingKey { selected: 0 }
+        );
         assert_eq!(state.mode, AppMode::PermissionPrompt); // still in prompt mode
     }
 
@@ -2246,7 +2290,10 @@ mod p_key_handler_tests {
         state.update(AppEvent::Key(key_x));
 
         match &state.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => {
                 assert_eq!(edit_buffer, "Bash(npm*)x");
                 assert_eq!(*cursor, "Bash(npm*)x".len());
             }
@@ -2269,7 +2316,10 @@ mod p_key_handler_tests {
         state.update(AppEvent::Key(key_bs));
 
         match &state.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => {
                 assert_eq!(edit_buffer, "Bash(npm*");
                 assert_eq!(*cursor, "Bash(npm*".len());
             }
@@ -2296,7 +2346,10 @@ mod p_key_handler_tests {
         state.update(AppEvent::Key(key_bs));
 
         match &state.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => {
                 assert_eq!(edit_buffer, "hello");
                 assert_eq!(*cursor, 0);
             }
@@ -2325,7 +2378,10 @@ mod p_key_handler_tests {
         state.update(AppEvent::Key(key_del));
 
         match &state.prompt_state {
-            PermissionPromptState::EditingPattern { edit_buffer, cursor } => {
+            PermissionPromptState::EditingPattern {
+                edit_buffer,
+                cursor,
+            } => {
                 assert_eq!(edit_buffer, "ello");
                 assert_eq!(*cursor, 0);
             }
@@ -2446,17 +2502,26 @@ mod p_key_handler_tests {
         // 'y' still allows once
         let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
         let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
-        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(true));
+        assert_eq!(
+            state.update(AppEvent::Key(key)),
+            UpdateResult::ResumeRun(true)
+        );
 
         // 'a' still grants session allow
         let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(true));
+        assert_eq!(
+            state.update(AppEvent::Key(key)),
+            UpdateResult::ResumeRun(true)
+        );
 
         // 'n' still denies
         let mut state = make_prompt_state_with_tool("shell", json!({"command": "ls"}));
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
-        assert_eq!(state.update(AppEvent::Key(key)), UpdateResult::ResumeRun(false));
+        assert_eq!(
+            state.update(AppEvent::Key(key)),
+            UpdateResult::ResumeRun(false)
+        );
     }
 
     // --- Editing and confirming actually grants session allow ---
@@ -2484,6 +2549,8 @@ mod p_key_handler_tests {
 
         // Verify the session allow was granted: a subsequent "cargo build" call should be allowed
         let check_input = json!({"command": "cargo build --release"});
-        assert!(state.permissions.has_session_allow("Bash", Some(&check_input)));
+        assert!(state
+            .permissions
+            .has_session_allow("Bash", Some(&check_input)));
     }
 }

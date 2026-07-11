@@ -136,10 +136,7 @@ struct RoutingProvider;
 
 #[async_trait]
 impl ModelProvider for RoutingProvider {
-    async fn resolve(
-        &self,
-        model_name: &str,
-    ) -> Result<Arc<dyn Model>, agent_core::ModelError> {
+    async fn resolve(&self, model_name: &str) -> Result<Arc<dyn Model>, agent_core::ModelError> {
         match model_name {
             "parent" => Ok(Arc::new(ParentModel)),
             _ => Ok(Arc::new(SubModel)),
@@ -159,7 +156,9 @@ async fn background_sub_agent_completes_in_store() {
     let sub_agent = Agent::builder("sub-agent")
         .instructions(Instructions::Static("helper".to_string()))
         .build();
-    let sub_config = RunConfig::builder(provider.clone(), "sub").max_turns(5).build();
+    let sub_config = RunConfig::builder(provider.clone(), "sub")
+        .max_turns(5)
+        .build();
 
     let def = SubAgentDef {
         agent: Arc::new(sub_agent),
@@ -173,9 +172,7 @@ async fn background_sub_agent_completes_in_store() {
     let sub_tool = SubAgentTool::with_task_store(def, sub_config, store.clone());
 
     // Parent runs on the "parent" model
-    let parent = Agent::builder("parent")
-        .tool(Arc::new(sub_tool))
-        .build();
+    let parent = Agent::builder("parent").tool(Arc::new(sub_tool)).build();
     let parent_config = RunConfig::builder(provider.clone(), "parent")
         .task_store(store.clone())
         .max_turns(5)
@@ -305,10 +302,7 @@ struct AwaitingRoutingProvider;
 
 #[async_trait]
 impl ModelProvider for AwaitingRoutingProvider {
-    async fn resolve(
-        &self,
-        model_name: &str,
-    ) -> Result<Arc<dyn Model>, agent_core::ModelError> {
+    async fn resolve(&self, model_name: &str) -> Result<Arc<dyn Model>, agent_core::ModelError> {
         match model_name {
             "parent" => Ok(Arc::new(AwaitingParentModel)),
             _ => Ok(Arc::new(SubModel)),
@@ -330,7 +324,9 @@ async fn parent_run_receives_background_sub_agent_result() {
     let sub_agent = Agent::builder("sub-agent")
         .instructions(Instructions::Static("helper".to_string()))
         .build();
-    let sub_config = RunConfig::builder(provider.clone(), "sub").max_turns(5).build();
+    let sub_config = RunConfig::builder(provider.clone(), "sub")
+        .max_turns(5)
+        .build();
 
     let def = SubAgentDef {
         agent: Arc::new(sub_agent),
@@ -343,9 +339,7 @@ async fn parent_run_receives_background_sub_agent_result() {
     };
     let sub_tool = SubAgentTool::with_task_store(def, sub_config, store.clone());
 
-    let parent = Agent::builder("parent")
-        .tool(Arc::new(sub_tool))
-        .build();
+    let parent = Agent::builder("parent").tool(Arc::new(sub_tool)).build();
     let parent_config = RunConfig::builder(provider.clone(), "parent")
         .task_store(store.clone())
         .max_turns(10)

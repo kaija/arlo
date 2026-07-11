@@ -26,12 +26,16 @@ pub struct RunContext {
 /// A boxed future that is Send.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// A function that generates instructions based on the current run context.
+pub type DynamicInstructionsFn =
+    Arc<dyn Fn(&RunContext) -> BoxFuture<'static, String> + Send + Sync>;
+
 /// The instructions for an agent, either static or dynamically generated.
 pub enum Instructions {
     /// A fixed instruction string.
     Static(String),
     /// A function that generates instructions based on the current run context.
-    Dynamic(Arc<dyn Fn(&RunContext) -> BoxFuture<'static, String> + Send + Sync>),
+    Dynamic(DynamicInstructionsFn),
 }
 
 impl fmt::Debug for Instructions {
@@ -482,9 +486,6 @@ mod tests {
         assert!(matches!(inst, Instructions::Static(ref s) if s.is_empty()));
     }
 
-
-
-
     #[test]
     fn sub_agent_def_debug() {
         let sub = SubAgentDef {
@@ -559,7 +560,9 @@ mod tests {
     #[test]
     fn agent_builder_model_accepts_string_and_str() {
         let agent1 = Agent::builder("a").model("model-name").build();
-        let agent2 = Agent::builder("b").model(String::from("model-name")).build();
+        let agent2 = Agent::builder("b")
+            .model(String::from("model-name"))
+            .build();
         assert_eq!(agent1.model, agent2.model);
     }
 

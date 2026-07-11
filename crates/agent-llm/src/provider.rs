@@ -405,7 +405,10 @@ impl ModelProvider for UnifiedProvider {
             #[cfg(feature = "ollama")]
             "ollama" => {
                 // Ollama uses OpenAI-compatible API format
-                let host = self.ollama_host.as_deref().unwrap_or("http://localhost:11434");
+                let host = self
+                    .ollama_host
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434");
                 let base_url = format!("{}/v1", host.trim_end_matches('/'));
                 Ok(Arc::new(OpenAIHttpModel::new(
                     bare_name,
@@ -546,7 +549,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_prefixed_anthropic_model() {
         let provider = test_provider();
-        let model = provider.resolve("anthropic:claude-sonnet-4-20250514").await.unwrap();
+        let model = provider
+            .resolve("anthropic:claude-sonnet-4-20250514")
+            .await
+            .unwrap();
         assert_eq!(model.name(), "claude-sonnet-4-20250514");
         assert_eq!(model.provider(), "anthropic");
     }
@@ -767,7 +773,10 @@ mod tests {
     #[tokio::test]
     async fn stub_model_metadata() {
         let provider = test_provider();
-        let model = provider.resolve("anthropic:claude-sonnet-4-20250514").await.unwrap();
+        let model = provider
+            .resolve("anthropic:claude-sonnet-4-20250514")
+            .await
+            .unwrap();
         assert_eq!(model.context_window(), 200_000);
         assert_eq!(model.max_output_tokens(), 8_192);
         assert!(model.supports_tools());
@@ -845,8 +854,7 @@ mod tests {
     #[cfg(feature = "ollama")]
     #[test]
     fn from_profile_ollama_uses_provided_base_url() {
-        let profile =
-            make_resolved_profile("ollama", None, Some("http://custom-host:11434"));
+        let profile = make_resolved_profile("ollama", None, Some("http://custom-host:11434"));
         let result = UnifiedProvider::from_profile(&profile);
         assert!(result.is_ok());
         let provider = result.unwrap();

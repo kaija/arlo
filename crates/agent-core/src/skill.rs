@@ -122,16 +122,14 @@ fn parse_skill_file(content: &str, file_path: &Path, source: SkillSource) -> Opt
     let end_idx = after_first.find("\n---")?;
     let yaml_str = &after_first[..end_idx];
     let body_start = end_idx + 4; // skip "\n---"
-    let body = after_first[body_start..].trim_start_matches('\n').to_string();
+    let body = after_first[body_start..]
+        .trim_start_matches('\n')
+        .to_string();
 
     let frontmatter: SkillFrontmatter = match serde_yaml::from_str(yaml_str) {
         Ok(fm) => fm,
         Err(e) => {
-            tracing::warn!(
-                "Skill file {:?} has invalid frontmatter: {}",
-                file_path,
-                e
-            );
+            tracing::warn!("Skill file {:?} has invalid frontmatter: {}", file_path, e);
             return None;
         }
     };
@@ -243,10 +241,7 @@ impl SkillRegistry {
             if !path.is_file() {
                 continue;
             }
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !file_name.to_lowercase().ends_with(".md") {
                 continue;
             }
@@ -526,12 +521,7 @@ mod tests {
         let skill = parse_skill_file(content, path, source).unwrap();
 
         assert_eq!(skill.name, "refactor");
-        assert_eq!(
-            skill.context,
-            SkillContext::Fork {
-                max_turns: Some(5)
-            }
-        );
+        assert_eq!(skill.context, SkillContext::Fork { max_turns: Some(5) });
         assert_eq!(skill.allowed_tools, vec!["read_file", "write_file"]);
     }
 
@@ -677,7 +667,8 @@ mod tests {
         let user_skills = user_dir.path();
 
         // Both have a skill named "code-review" but with different descriptions
-        let project_content = "---\nname: code-review\ndescription: Project version\n---\nProject body\n";
+        let project_content =
+            "---\nname: code-review\ndescription: Project version\n---\nProject body\n";
         let user_content = "---\nname: code-review\ndescription: User version\n---\nUser body\n";
 
         fs::write(project_skills.join("review.md"), project_content).unwrap();
@@ -978,9 +969,8 @@ mod tests {
 
     /// Strategy to generate a base_dir path.
     fn arb_base_dir() -> impl Strategy<Value = String> {
-        prop::collection::vec("[a-zA-Z0-9_\\-]{1,10}", 1..5).prop_map(|parts| {
-            format!("/{}", parts.join("/"))
-        })
+        prop::collection::vec("[a-zA-Z0-9_\\-]{1,10}", 1..5)
+            .prop_map(|parts| format!("/{}", parts.join("/")))
     }
 
     /// Strategy to generate a template body containing template variables.
@@ -990,8 +980,8 @@ mod tests {
         let static_text = "[a-zA-Z ,.]{0,20}";
         (
             prop::collection::vec(static_text, 3..6),
-            prop::bool::ANY,     // include $ARGUMENTS?
-            prop::bool::ANY,     // include ${SKILL_DIR}?
+            prop::bool::ANY,                          // include $ARGUMENTS?
+            prop::bool::ANY,                          // include ${SKILL_DIR}?
             prop::collection::vec(1..=max_pos, 0..5), // positional vars to include
         )
             .prop_map(|(texts, include_args, include_dir, positions)| {

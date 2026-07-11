@@ -62,7 +62,10 @@ fn message_to_wire(msg: &Message) -> Value {
             }
 
             // If only one text block and no images, use simple string content
-            if text_blocks.len() == 1 && matches!(&content[0], ContentBlock::Text { .. }) && tool_calls.is_empty() {
+            if text_blocks.len() == 1
+                && matches!(&content[0], ContentBlock::Text { .. })
+                && tool_calls.is_empty()
+            {
                 if let ContentBlock::Text { text } = &content[0] {
                     obj["content"] = json!(text);
                 } else {
@@ -171,10 +174,12 @@ pub fn from_wire(wire: &Value) -> Result<Vec<ContentBlock>, ConvertError> {
                 })?
                 .to_string();
 
-            let function = tc.get("function").ok_or_else(|| ConvertError::MissingField {
-                field: "function".to_string(),
-                context: "OpenAI tool_call".to_string(),
-            })?;
+            let function = tc
+                .get("function")
+                .ok_or_else(|| ConvertError::MissingField {
+                    field: "function".to_string(),
+                    context: "OpenAI tool_call".to_string(),
+                })?;
 
             let name = function
                 .get("name")
@@ -203,10 +208,7 @@ pub fn from_wire(wire: &Value) -> Result<Vec<ContentBlock>, ConvertError> {
 
 /// Parse a single content block from the OpenAI content array.
 fn parse_content_block(item: &Value) -> Result<ContentBlock, ConvertError> {
-    let block_type = item
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("text");
+    let block_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("text");
 
     match block_type {
         "text" => {
@@ -478,7 +480,10 @@ mod tests {
         });
         let result = from_wire(&wire);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::UnknownBlockType(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::UnknownBlockType(_)
+        ));
     }
 
     #[test]
@@ -489,7 +494,10 @@ mod tests {
         });
         let result = from_wire(&wire);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::MissingField { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::MissingField { .. }
+        ));
     }
 
     #[test]
@@ -543,7 +551,7 @@ mod tests {
                 Just(serde_json::Value::Null),
                 any::<bool>().prop_map(serde_json::Value::Bool),
                 any::<i64>().prop_map(|n| serde_json::Value::Number(serde_json::Number::from(n))),
-                "[a-zA-Z0-9 _-]{0,50}".prop_map(|s| serde_json::Value::String(s)),
+                "[a-zA-Z0-9 _-]{0,50}".prop_map(serde_json::Value::String),
             ];
 
             leaf.prop_recursive(
@@ -564,9 +572,9 @@ mod tests {
         /// Strategy for generating arbitrary ToolUseBlock values.
         fn arb_tool_use_block() -> impl Strategy<Value = ToolUseBlock> {
             (
-                "[a-zA-Z0-9_-]{1,20}",            // id
-                "[a-zA-Z_][a-zA-Z0-9_]{0,20}",    // name
-                arb_json_value(),                  // input
+                "[a-zA-Z0-9_-]{1,20}",         // id
+                "[a-zA-Z_][a-zA-Z0-9_]{0,20}", // name
+                arb_json_value(),              // input
             )
                 .prop_map(|(id, name, input)| ToolUseBlock { id, name, input })
         }

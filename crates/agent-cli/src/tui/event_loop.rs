@@ -27,7 +27,11 @@ pub struct TerminalPoller {
 ///
 /// Returns (event_sender, poller) — the sender is shared with stream tasks so
 /// all events flow into a single receiver in the main loop.
-pub fn spawn_terminal_poller() -> (mpsc::UnboundedSender<AppEvent>, mpsc::UnboundedReceiver<AppEvent>, TerminalPoller) {
+pub fn spawn_terminal_poller() -> (
+    mpsc::UnboundedSender<AppEvent>,
+    mpsc::UnboundedReceiver<AppEvent>,
+    TerminalPoller,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let term_tx = tx.clone();

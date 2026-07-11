@@ -162,13 +162,13 @@ pub fn from_wire(wire: &Value) -> Result<Vec<ContentBlock>, ConvertError> {
 
 /// Parse a single content block from an Anthropic content array.
 fn parse_content_block(item: &Value) -> Result<ContentBlock, ConvertError> {
-    let block_type = item
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ConvertError::MissingField {
-            field: "type".to_string(),
-            context: "Anthropic content block".to_string(),
-        })?;
+    let block_type =
+        item.get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ConvertError::MissingField {
+                field: "type".to_string(),
+                context: "Anthropic content block".to_string(),
+            })?;
 
     match block_type {
         "text" => {
@@ -180,10 +180,12 @@ fn parse_content_block(item: &Value) -> Result<ContentBlock, ConvertError> {
             Ok(ContentBlock::Text { text })
         }
         "image" => {
-            let source = item.get("source").ok_or_else(|| ConvertError::MissingField {
-                field: "source".to_string(),
-                context: "Anthropic image block".to_string(),
-            })?;
+            let source = item
+                .get("source")
+                .ok_or_else(|| ConvertError::MissingField {
+                    field: "source".to_string(),
+                    context: "Anthropic image block".to_string(),
+                })?;
             let media_type = source
                 .get("media_type")
                 .and_then(|v| v.as_str())
@@ -309,7 +311,10 @@ mod tests {
         assert_eq!(result.messages[0]["content"][1]["type"], "tool_use");
         assert_eq!(result.messages[0]["content"][1]["id"], "tu_1");
         assert_eq!(result.messages[0]["content"][1]["name"], "read_file");
-        assert_eq!(result.messages[0]["content"][1]["input"], json!({"path": "/tmp/x"}));
+        assert_eq!(
+            result.messages[0]["content"][1]["input"],
+            json!({"path": "/tmp/x"})
+        );
     }
 
     #[test]
@@ -408,7 +413,9 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             ContentBlock::Image {
-                media_type, data, source_type
+                media_type,
+                data,
+                source_type,
             } => {
                 assert_eq!(media_type, "image/jpeg");
                 assert_eq!(data, "abc123");
@@ -441,7 +448,10 @@ mod tests {
         let wire = json!([{"type": "audio", "data": "..."}]);
         let result = from_wire(&wire);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::UnknownBlockType(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::UnknownBlockType(_)
+        ));
     }
 
     #[test]
@@ -449,7 +459,10 @@ mod tests {
         let wire = json!([{"type": "tool_use", "name": "x", "input": {}}]);
         let result = from_wire(&wire);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConvertError::MissingField { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConvertError::MissingField { .. }
+        ));
     }
 
     #[test]
@@ -502,7 +515,7 @@ mod tests {
                 Just(serde_json::Value::Null),
                 any::<bool>().prop_map(serde_json::Value::Bool),
                 any::<i64>().prop_map(|n| serde_json::Value::Number(serde_json::Number::from(n))),
-                "[a-zA-Z0-9 _-]{0,50}".prop_map(|s| serde_json::Value::String(s)),
+                "[a-zA-Z0-9 _-]{0,50}".prop_map(serde_json::Value::String),
             ];
 
             leaf.prop_recursive(
@@ -523,9 +536,9 @@ mod tests {
         /// Strategy for generating arbitrary ToolUseBlock values.
         fn arb_tool_use_block() -> impl Strategy<Value = ToolUseBlock> {
             (
-                "[a-zA-Z0-9_-]{1,20}",            // id
-                "[a-zA-Z_][a-zA-Z0-9_]{0,20}",    // name
-                arb_json_value(),                  // input
+                "[a-zA-Z0-9_-]{1,20}",         // id
+                "[a-zA-Z_][a-zA-Z0-9_]{0,20}", // name
+                arb_json_value(),              // input
             )
                 .prop_map(|(id, name, input)| ToolUseBlock { id, name, input })
         }
@@ -540,10 +553,12 @@ mod tests {
                     "[a-zA-Z0-9+/=]{0,50}",
                     Just("base64".to_string()),
                 )
-                    .prop_map(|(media_type, data, source_type)| ContentBlock::Image {
-                        media_type,
-                        data,
-                        source_type,
+                    .prop_map(|(media_type, data, source_type)| {
+                        ContentBlock::Image {
+                            media_type,
+                            data,
+                            source_type,
+                        }
                     }),
                 arb_tool_use_block().prop_map(|block| ContentBlock::ToolUse { block }),
             ]

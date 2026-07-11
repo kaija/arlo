@@ -91,10 +91,7 @@ impl Tool for WebSearchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("Missing required 'query' field".to_string()))?;
 
-        let count = input
-            .get("count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10) as usize;
+        let count = input.get("count").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
         let results = self.provider.search(query, count).await?;
 
@@ -177,7 +174,11 @@ pub fn parse_brave_results(json: &Value) -> Vec<SearchResult> {
                         .and_then(|d| d.as_str())
                         .unwrap_or("")
                         .to_string();
-                    Some(SearchResult { title, url, snippet })
+                    Some(SearchResult {
+                        title,
+                        url,
+                        snippet,
+                    })
                 })
                 .collect()
         })
@@ -187,8 +188,8 @@ pub fn parse_brave_results(json: &Value) -> Vec<SearchResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use serde_json::json;
+    use std::path::PathBuf;
 
     /// A mock search provider for testing WebSearchTool.
     struct MockSearchProvider {
@@ -213,8 +214,14 @@ mod tests {
 
     #[async_trait]
     impl SearchProvider for FailingSearchProvider {
-        async fn search(&self, _query: &str, _count: usize) -> Result<Vec<SearchResult>, ToolError> {
-            Err(ToolError::ExecutionFailed("Search API unavailable".to_string()))
+        async fn search(
+            &self,
+            _query: &str,
+            _count: usize,
+        ) -> Result<Vec<SearchResult>, ToolError> {
+            Err(ToolError::ExecutionFailed(
+                "Search API unavailable".to_string(),
+            ))
         }
     }
 
@@ -254,10 +261,7 @@ mod tests {
             "A language empowering everyone to build reliable software."
         );
 
-        assert_eq!(
-            results[1].title,
-            "Rust (programming language) - Wikipedia"
-        );
+        assert_eq!(results[1].title, "Rust (programming language) - Wikipedia");
         assert_eq!(
             results[1].url,
             "https://en.wikipedia.org/wiki/Rust_(programming_language)"
@@ -394,7 +398,10 @@ mod tests {
     fn web_search_tool_description() {
         let provider = MockSearchProvider::new(vec![]);
         let tool = WebSearchTool::new(Box::new(provider));
-        assert_eq!(tool.description(), "Search the web using a configured search provider");
+        assert_eq!(
+            tool.description(),
+            "Search the web using a configured search provider"
+        );
     }
 
     #[test]
@@ -442,7 +449,9 @@ mod tests {
         let tool = WebSearchTool::new(Box::new(provider));
         let ctx = make_context();
 
-        let result = tool.execute(json!({"query": "rust programming"}), &ctx).await;
+        let result = tool
+            .execute(json!({"query": "rust programming"}), &ctx)
+            .await;
         assert!(result.is_ok());
 
         match result.unwrap() {
@@ -508,7 +517,10 @@ mod tests {
         let tool = WebSearchTool::new(Box::new(provider));
         let ctx = make_context();
 
-        let result = tool.execute(json!({"query": "test", "count": 3}), &ctx).await.unwrap();
+        let result = tool
+            .execute(json!({"query": "test", "count": 3}), &ctx)
+            .await
+            .unwrap();
         match result {
             ToolOutput::Structured(Value::Array(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -523,7 +535,10 @@ mod tests {
         let tool = WebSearchTool::new(Box::new(provider));
         let ctx = make_context();
 
-        let result = tool.execute(json!({"query": "nothing"}), &ctx).await.unwrap();
+        let result = tool
+            .execute(json!({"query": "nothing"}), &ctx)
+            .await
+            .unwrap();
         match result {
             ToolOutput::Structured(Value::Array(arr)) => {
                 assert!(arr.is_empty());

@@ -7,24 +7,15 @@ use crate::message::{ContentBlock, Message, Usage};
 
 /// Estimate tokens for a message list using the chars/4 heuristic.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|m| estimate_single_message_tokens(m))
-        .sum()
+    messages.iter().map(estimate_single_message_tokens).sum()
 }
 
 /// Estimate tokens for a single message using chars/4 heuristic.
 pub fn estimate_single_message_tokens(msg: &Message) -> usize {
     let chars: usize = match msg {
         Message::System { content } => content.len(),
-        Message::User { content } => content
-            .iter()
-            .map(|block| content_block_char_len(block))
-            .sum(),
-        Message::Assistant { content, .. } => content
-            .iter()
-            .map(|block| content_block_char_len(block))
-            .sum(),
+        Message::User { content } => content.iter().map(content_block_char_len).sum(),
+        Message::Assistant { content, .. } => content.iter().map(content_block_char_len).sum(),
         Message::ToolResult { content, .. } => content.len(),
     };
     chars / 4

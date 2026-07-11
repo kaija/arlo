@@ -102,7 +102,10 @@ impl Tool for FileWriteTool {
             ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path.display(), e))
         })?;
 
-        Ok(ToolOutput::Text(format!("File written: {}", path.display())))
+        Ok(ToolOutput::Text(format!(
+            "File written: {}",
+            path.display()
+        )))
     }
 }
 
@@ -146,7 +149,10 @@ mod tests {
         let ctx = make_context_with_dir(dir.path());
 
         let result = tool
-            .execute(json!({"path": "output.txt", "content": "hello world"}), &ctx)
+            .execute(
+                json!({"path": "output.txt", "content": "hello world"}),
+                &ctx,
+            )
             .await;
 
         assert!(result.is_ok());

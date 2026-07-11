@@ -94,11 +94,7 @@ pub trait OutputGuardrail: Send + Sync {
     /// # Arguments
     /// * `output` — The text output from the model.
     /// * `structured` — Optional structured (JSON) output, if the agent produced one.
-    async fn check(
-        &self,
-        output: &str,
-        structured: Option<&serde_json::Value>,
-    ) -> GuardrailResult;
+    async fn check(&self, output: &str, structured: Option<&serde_json::Value>) -> GuardrailResult;
 }
 
 /// A guardrail that checks tool inputs before execution and outputs after execution.
@@ -120,22 +116,14 @@ pub trait ToolGuardrail: Send + Sync {
     /// # Arguments
     /// * `tool_name` — The name of the tool being invoked.
     /// * `input` — The JSON arguments being passed to the tool.
-    async fn check_input(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> GuardrailResult;
+    async fn check_input(&self, tool_name: &str, input: &serde_json::Value) -> GuardrailResult;
 
     /// Check the tool's output after execution.
     ///
     /// # Arguments
     /// * `tool_name` — The name of the tool that was invoked.
     /// * `output` — The text output from the tool execution.
-    async fn check_output(
-        &self,
-        tool_name: &str,
-        output: &str,
-    ) -> GuardrailResult;
+    async fn check_output(&self, tool_name: &str, output: &str) -> GuardrailResult;
 }
 
 #[cfg(test)]
@@ -232,11 +220,7 @@ mod tests {
             }
         }
 
-        async fn check_output(
-            &self,
-            _tool_name: &str,
-            output: &str,
-        ) -> GuardrailResult {
+        async fn check_output(&self, _tool_name: &str, output: &str) -> GuardrailResult {
             if output.contains("SENSITIVE") {
                 GuardrailResult::fail("Tool output contains sensitive data")
             } else {
@@ -580,7 +564,11 @@ mod prop_tests {
             match outcome {
                 GuardrailOutcome::Pass => continue,
                 GuardrailOutcome::Fail(reason) => {
-                    return (GuardrailResult::fail(reason.clone()), checked_count, Some(i));
+                    return (
+                        GuardrailResult::fail(reason.clone()),
+                        checked_count,
+                        Some(i),
+                    );
                 }
             }
         }
@@ -677,16 +665,16 @@ mod prop_tests {
                         "Only guardrails up to and including the failure should be checked");
 
                     // Guardrails before and at the failure should be called
-                    for i in 0..=expected_idx {
+                    for (i, flag) in flags.iter().enumerate().take(expected_idx + 1) {
                         prop_assert_eq!(
-                            flags[i].load(Ordering::SeqCst), 1,
+                            flag.load(Ordering::SeqCst), 1,
                             "Guardrail {} (at or before failure) should be called", i
                         );
                     }
                     // Guardrails after the failure should NOT be called
-                    for i in (expected_idx + 1)..len {
+                    for (i, flag) in flags.iter().enumerate().take(len).skip(expected_idx + 1) {
                         prop_assert_eq!(
-                            flags[i].load(Ordering::SeqCst), 0,
+                            flag.load(Ordering::SeqCst), 0,
                             "Guardrail {} (after failure at {}) should NOT be called", i, expected_idx
                         );
                     }
@@ -720,9 +708,9 @@ mod prop_tests {
             prop_assert_eq!(checked, prefix_len + 1);
 
             // Verify suffix guardrails were never invoked
-            for i in (prefix_len + 1)..total_len {
+            for (i, flag) in flags.iter().enumerate().take(total_len).skip(prefix_len + 1) {
                 prop_assert_eq!(
-                    flags[i].load(Ordering::SeqCst), 0,
+                    flag.load(Ordering::SeqCst), 0,
                     "Guardrail {} after failure should never be checked", i
                 );
             }

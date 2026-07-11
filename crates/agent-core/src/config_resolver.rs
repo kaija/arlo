@@ -35,7 +35,11 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownProfile { name } => {
-                write!(f, "Unknown profile '{}': not found in any settings file", name)
+                write!(
+                    f,
+                    "Unknown profile '{}': not found in any settings file",
+                    name
+                )
             }
             Self::MissingCredentials { provider, profile } => {
                 write!(
@@ -129,9 +133,13 @@ impl ConfigResolver {
             },
         };
 
-        let config = merged.profiles.get(&profile_name).ok_or_else(|| {
-            ConfigError::UnknownProfile { name: profile_name.clone() }
-        })?;
+        let config =
+            merged
+                .profiles
+                .get(&profile_name)
+                .ok_or_else(|| ConfigError::UnknownProfile {
+                    name: profile_name.clone(),
+                })?;
 
         Ok(Some(ResolvedProfile {
             provider: config.provider.clone().unwrap_or_default(),
@@ -272,10 +280,7 @@ impl ConfigResolver {
     /// for profiles with the same name. Non-conflicting profiles are unioned.
     ///
     /// Default key: project takes priority, then user.
-    pub fn merge_profiles(
-        user: ProfilesSection,
-        project: ProfilesSection,
-    ) -> ProfilesSection {
+    pub fn merge_profiles(user: ProfilesSection, project: ProfilesSection) -> ProfilesSection {
         let mut merged_profiles = user.profiles;
 
         // Project profiles fully replace user profiles of the same name
@@ -402,10 +407,7 @@ mod tests {
 
         let merged = ConfigResolver::merge_profiles(user, project);
         assert_eq!(merged.profiles.len(), 1);
-        assert_eq!(
-            merged.profiles["work"].api_key,
-            Some("sk-user".to_string())
-        );
+        assert_eq!(merged.profiles["work"].api_key, Some("sk-user".to_string()));
         assert_eq!(merged.default, Some("work".to_string()));
     }
 
@@ -624,10 +626,7 @@ mod tests {
         let result = ConfigResolver::load_profiles_from_project(tmp.path());
         assert_eq!(result.default, Some("test".to_string()));
         assert_eq!(result.profiles.len(), 1);
-        assert_eq!(
-            result.profiles["test"].api_key,
-            Some("sk-test".to_string())
-        );
+        assert_eq!(result.profiles["test"].api_key, Some("sk-test".to_string()));
     }
 
     #[test]
@@ -681,7 +680,9 @@ mod tests {
         let result = ConfigResolver::select_profile(&merged, &Some("nonexistent".to_string()));
         assert_eq!(
             result.unwrap_err(),
-            ConfigError::UnknownProfile { name: "nonexistent".to_string() }
+            ConfigError::UnknownProfile {
+                name: "nonexistent".to_string()
+            }
         );
     }
 
@@ -777,7 +778,10 @@ mod tests {
         assert_eq!(profile.model, "gpt-4");
         assert_eq!(profile.context_window, Some(128000));
         assert_eq!(profile.max_output_tokens, Some(4096));
-        assert_eq!(profile.extra.get("org"), Some(&serde_json::json!("org-123")));
+        assert_eq!(
+            profile.extra.get("org"),
+            Some(&serde_json::json!("org-123"))
+        );
     }
 
     #[test]
@@ -798,7 +802,7 @@ mod tests {
         let result = ConfigResolver::select_profile(&merged, &Some("minimal".to_string()));
         let profile = result.unwrap().unwrap();
         assert_eq!(profile.provider, ""); // unwrap_or_default
-        assert_eq!(profile.model, "");    // unwrap_or_default
+        assert_eq!(profile.model, ""); // unwrap_or_default
     }
 
     // ===================================================================
@@ -881,7 +885,10 @@ mod tests {
             extra: HashMap::new(),
         };
         let result = ConfigResolver::apply_env_overrides(profile);
-        assert_eq!(result.base_url, Some("https://custom.openai.com/v1".to_string()));
+        assert_eq!(
+            result.base_url,
+            Some("https://custom.openai.com/v1".to_string())
+        );
         assert_eq!(result.api_key, Some("sk-key".to_string())); // unchanged, env var removed
 
         std::env::remove_var("OPENAI_BASE_URL");
@@ -967,10 +974,13 @@ mod tests {
         };
 
         let err = ConfigResolver::validate_credentials(&profile).unwrap_err();
-        assert_eq!(err, ConfigError::MissingCredentials {
-            provider: "openai".to_string(),
-            profile: "(resolved)".to_string(),
-        });
+        assert_eq!(
+            err,
+            ConfigError::MissingCredentials {
+                provider: "openai".to_string(),
+                profile: "(resolved)".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -986,10 +996,13 @@ mod tests {
         };
 
         let err = ConfigResolver::validate_credentials(&profile).unwrap_err();
-        assert_eq!(err, ConfigError::MissingCredentials {
-            provider: "anthropic".to_string(),
-            profile: "(resolved)".to_string(),
-        });
+        assert_eq!(
+            err,
+            ConfigError::MissingCredentials {
+                provider: "anthropic".to_string(),
+                profile: "(resolved)".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1106,7 +1119,12 @@ mod tests {
         };
 
         let err = ConfigResolver::resolve(&inputs).unwrap_err();
-        assert_eq!(err, ConfigError::UnknownProfile { name: "nonexistent".to_string() });
+        assert_eq!(
+            err,
+            ConfigError::UnknownProfile {
+                name: "nonexistent".to_string()
+            }
+        );
     }
 
     #[test]
@@ -1213,17 +1231,19 @@ mod tests {
                 proptest::option::of(1usize..500_000),
                 proptest::option::of(1usize..50_000),
             )
-                .prop_map(|(provider, api_key, base_url, model, context_window, max_output_tokens)| {
-                    ProfileConfig {
-                        provider: Some(provider),
-                        api_key,
-                        base_url,
-                        model,
-                        context_window,
-                        max_output_tokens,
-                        extra: HashMap::new(),
-                    }
-                })
+                .prop_map(
+                    |(provider, api_key, base_url, model, context_window, max_output_tokens)| {
+                        ProfileConfig {
+                            provider: Some(provider),
+                            api_key,
+                            base_url,
+                            model,
+                            context_window,
+                            max_output_tokens,
+                            extra: HashMap::new(),
+                        }
+                    },
+                )
         }
 
         proptest! {

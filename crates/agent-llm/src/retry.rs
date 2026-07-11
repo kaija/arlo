@@ -71,7 +71,9 @@ impl Default for RetryConfig {
 /// with random jitter of 0–25% added on top.
 pub fn compute_backoff(attempt: u32, config: &RetryConfig) -> Duration {
     let base = config.initial_backoff_ms as f64
-        * config.backoff_multiplier.powi(attempt.saturating_sub(1) as i32);
+        * config
+            .backoff_multiplier
+            .powi(attempt.saturating_sub(1) as i32);
     let capped = base.min(config.max_backoff_ms as f64);
 
     let mut rng = rand::thread_rng();
@@ -85,9 +87,15 @@ pub fn compute_backoff(attempt: u32, config: &RetryConfig) -> Duration {
 ///
 /// This is useful for deterministic testing where you want to control the jitter.
 /// `jitter_factor` should be in range [0.0, 0.25].
-pub fn compute_backoff_with_jitter(attempt: u32, config: &RetryConfig, jitter_factor: f64) -> Duration {
+pub fn compute_backoff_with_jitter(
+    attempt: u32,
+    config: &RetryConfig,
+    jitter_factor: f64,
+) -> Duration {
     let base = config.initial_backoff_ms as f64
-        * config.backoff_multiplier.powi(attempt.saturating_sub(1) as i32);
+        * config
+            .backoff_multiplier
+            .powi(attempt.saturating_sub(1) as i32);
     let capped = base.min(config.max_backoff_ms as f64);
     let jitter = jitter_factor.clamp(0.0, 0.25) * capped;
 
@@ -241,9 +249,9 @@ mod proptests {
     /// formula within jitter bounds.
     fn arb_retry_config() -> impl Strategy<Value = RetryConfig> {
         (
-            100u64..=10000u64,    // initial_backoff_ms
-            5000u64..=60000u64,   // max_backoff_ms
-            150u32..=300u32,      // backoff_multiplier * 100 (1.5-3.0)
+            100u64..=10000u64,  // initial_backoff_ms
+            5000u64..=60000u64, // max_backoff_ms
+            150u32..=300u32,    // backoff_multiplier * 100 (1.5-3.0)
         )
             .prop_map(|(initial, max_raw, mult_100)| {
                 // Ensure max_backoff >= initial_backoff to avoid degenerate configs
@@ -415,7 +423,9 @@ mod tests {
     #[test]
     fn is_retryable_rate_limited() {
         let config = RetryConfig::default();
-        let err = ModelError::RateLimited { retry_after_ms: 5000 };
+        let err = ModelError::RateLimited {
+            retry_after_ms: 5000,
+        };
         assert!(is_retryable(&err, &config));
     }
 
@@ -441,7 +451,11 @@ mod tests {
                 status: *status,
                 body: "error".to_string(),
             };
-            assert!(is_retryable(&err, &config), "status {} should be retryable", status);
+            assert!(
+                is_retryable(&err, &config),
+                "status {} should be retryable",
+                status
+            );
         }
     }
 
@@ -453,7 +467,11 @@ mod tests {
                 status: *status,
                 body: "error".to_string(),
             };
-            assert!(!is_retryable(&err, &config), "status {} should NOT be retryable", status);
+            assert!(
+                !is_retryable(&err, &config),
+                "status {} should NOT be retryable",
+                status
+            );
         }
     }
 
@@ -477,17 +495,25 @@ mod tests {
             retryable_statuses: vec![418, 503],
             ..RetryConfig::default()
         };
-        let err_418 = ModelError::Api { status: 418, body: "teapot".to_string() };
+        let err_418 = ModelError::Api {
+            status: 418,
+            body: "teapot".to_string(),
+        };
         assert!(is_retryable(&err_418, &config));
 
-        let err_500 = ModelError::Api { status: 500, body: "error".to_string() };
+        let err_500 = ModelError::Api {
+            status: 500,
+            body: "error".to_string(),
+        };
         assert!(!is_retryable(&err_500, &config));
     }
 
     #[test]
     fn effective_backoff_respects_retry_after() {
         let config = RetryConfig::default();
-        let err = ModelError::RateLimited { retry_after_ms: 10000 };
+        let err = ModelError::RateLimited {
+            retry_after_ms: 10000,
+        };
         let backoff = effective_backoff(1, &err, &config);
         assert_eq!(backoff, Duration::from_millis(10000));
     }
@@ -498,7 +524,9 @@ mod tests {
             max_backoff_ms: 5000,
             ..RetryConfig::default()
         };
-        let err = ModelError::RateLimited { retry_after_ms: 60000 };
+        let err = ModelError::RateLimited {
+            retry_after_ms: 60000,
+        };
         let backoff = effective_backoff(1, &err, &config);
         assert_eq!(backoff, Duration::from_millis(5000));
     }
@@ -546,7 +574,9 @@ mod tests {
     #[tokio::test]
     async fn retry_with_fallback_first_attempt_succeeds() {
         let config = RetryConfig::default();
-        let model: Arc<dyn Model> = Arc::new(SuccessModel { name: "test-model".to_string() });
+        let model: Arc<dyn Model> = Arc::new(SuccessModel {
+            name: "test-model".to_string(),
+        });
         let models = vec![model];
         let request = ModelRequest {
             system: String::new(),
@@ -599,9 +629,14 @@ mod tests {
         };
         let primary: Arc<dyn Model> = Arc::new(FailModel {
             name: "primary".to_string(),
-            error_fn: || ModelError::Api { status: 500, body: "down".to_string() },
+            error_fn: || ModelError::Api {
+                status: 500,
+                body: "down".to_string(),
+            },
         });
-        let fallback: Arc<dyn Model> = Arc::new(SuccessModel { name: "fallback".to_string() });
+        let fallback: Arc<dyn Model> = Arc::new(SuccessModel {
+            name: "fallback".to_string(),
+        });
         let models = vec![primary, fallback];
         let request = ModelRequest {
             system: String::new(),
@@ -624,7 +659,10 @@ mod tests {
         };
         let model1: Arc<dyn Model> = Arc::new(FailModel {
             name: "model-1".to_string(),
-            error_fn: || ModelError::Api { status: 500, body: "error1".to_string() },
+            error_fn: || ModelError::Api {
+                status: 500,
+                body: "error1".to_string(),
+            },
         });
         let model2: Arc<dyn Model> = Arc::new(FailModel {
             name: "model-2".to_string(),
@@ -663,9 +701,9 @@ mod tests {
     #[async_trait::async_trait]
     impl Model for SuccessModel {
         async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-            use futures::stream;
-            use agent_core::stream::{StreamChunk, StopReason};
             use agent_core::message::Usage;
+            use agent_core::stream::{StopReason, StreamChunk};
+            use futures::stream;
             let chunks = vec![Ok(StreamChunk::MessageStop {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
@@ -673,17 +711,34 @@ mod tests {
             Ok(Box::pin(stream::iter(chunks)))
         }
 
-        async fn complete(&self, _request: ModelRequest) -> Result<agent_core::model::ModelResponse, ModelError> {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<agent_core::model::ModelResponse, ModelError> {
             Err(ModelError::Connection("not implemented".to_string()))
         }
 
-        fn name(&self) -> &str { &self.name }
-        fn provider(&self) -> &str { "test" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 0.0 }
-        fn output_cost_per_million(&self) -> f64 { 0.0 }
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            0.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            0.0
+        }
     }
 
     /// A model that always fails with a configurable error.
@@ -699,16 +754,33 @@ mod tests {
             Err((self.error_fn)())
         }
 
-        async fn complete(&self, _request: ModelRequest) -> Result<agent_core::model::ModelResponse, ModelError> {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<agent_core::model::ModelResponse, ModelError> {
             Err((self.error_fn)())
         }
 
-        fn name(&self) -> &str { &self.name }
-        fn provider(&self) -> &str { "test" }
-        fn context_window(&self) -> usize { 128000 }
-        fn max_output_tokens(&self) -> usize { 4096 }
-        fn supports_tools(&self) -> bool { true }
-        fn input_cost_per_million(&self) -> f64 { 0.0 }
-        fn output_cost_per_million(&self) -> f64 { 0.0 }
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn context_window(&self) -> usize {
+            128000
+        }
+        fn max_output_tokens(&self) -> usize {
+            4096
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        fn input_cost_per_million(&self) -> f64 {
+            0.0
+        }
+        fn output_cost_per_million(&self) -> f64 {
+            0.0
+        }
     }
 }

@@ -107,9 +107,7 @@ mod tests {
         };
 
         // Spawn the handler call in a task
-        let handle = tokio::spawn(async move {
-            handler.request_approval(&context).await
-        });
+        let handle = tokio::spawn(async move { handler.request_approval(&context).await });
 
         // The TUI side receives the request
         let received = req_rx.recv().await.unwrap();
@@ -164,9 +162,7 @@ mod tests {
         };
 
         // Spawn handler
-        let handle = tokio::spawn(async move {
-            handler.request_approval(&context).await
-        });
+        let handle = tokio::spawn(async move { handler.request_approval(&context).await });
 
         // Receive the request on the TUI side
         let _received = req_rx.recv().await.unwrap();
@@ -191,9 +187,7 @@ mod tests {
             pending: vec![pending("Bash")],
         };
 
-        let handle = tokio::spawn(async move {
-            handler.request_approval(&context).await
-        });
+        let handle = tokio::spawn(async move { handler.request_approval(&context).await });
 
         // Receive and respond with AlwaysAllow
         let _received = req_rx.recv().await.unwrap();
@@ -226,17 +220,12 @@ mod tests {
             pending: vec![pending("shell")],
         };
 
-        let handle = tokio::spawn(async move {
-            handler.request_approval(&context).await
-        });
+        let handle = tokio::spawn(async move { handler.request_approval(&context).await });
 
         let received = req_rx.recv().await.unwrap();
         assert_eq!(received.agent_name, None);
 
-        resp_tx
-            .send(vec![ApprovalResponse::Allow])
-            .await
-            .unwrap();
+        resp_tx.send(vec![ApprovalResponse::Allow]).await.unwrap();
 
         let result = handle.await.unwrap();
         assert_eq!(result[0], ApprovalResponse::Allow);

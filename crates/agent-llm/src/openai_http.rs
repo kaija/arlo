@@ -72,9 +72,8 @@ impl OpenAIHttpModel {
         // Reasoning models (o-series) don't support temperature — skip it for those.
         if let Some(temp) = request.temperature {
             let name = self.model_name.to_lowercase();
-            let is_reasoning = name.starts_with("o1")
-                || name.starts_with("o3")
-                || name.starts_with("o4");
+            let is_reasoning =
+                name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4");
             if !is_reasoning {
                 body["temperature"] = json!(temp);
             }
@@ -151,19 +150,16 @@ impl OpenAIHttpModel {
         };
 
         // Parse content blocks using the converter
-        let content_blocks =
-            openai_convert::from_wire(message).map_err(|e| ModelError::Api {
-                status: 0,
-                body: format!("Failed to parse response: {}", e),
-            })?;
+        let content_blocks = openai_convert::from_wire(message).map_err(|e| ModelError::Api {
+            status: 0,
+            body: format!("Failed to parse response: {}", e),
+        })?;
 
         // Convert to model::ContentBlock format
         let content = content_blocks
             .into_iter()
             .map(|b| match b {
-                ContentBlock::Text { text } => {
-                    agent_core::model::ContentBlock::Text { text }
-                }
+                ContentBlock::Text { text } => agent_core::model::ContentBlock::Text { text },
                 ContentBlock::ToolUse { block } => agent_core::model::ContentBlock::ToolUse {
                     id: block.id,
                     name: block.name,
@@ -279,10 +275,7 @@ impl Model for OpenAIHttpModel {
                                 let input: Value =
                                     serde_json::from_str(&current_tool_args).unwrap_or(json!({}));
                                 let _ = tx
-                                    .send(Ok(StreamChunk::ToolUseEnd {
-                                        id: tool_id,
-                                        input,
-                                    }))
+                                    .send(Ok(StreamChunk::ToolUseEnd { id: tool_id, input }))
                                     .await;
                                 current_tool_args.clear();
                                 _current_tool_name = None;
@@ -351,8 +344,7 @@ impl Model for OpenAIHttpModel {
                         }
 
                         // Handle tool_calls delta
-                        if let Some(tool_calls) =
-                            delta.get("tool_calls").and_then(|v| v.as_array())
+                        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array())
                         {
                             for tc in tool_calls {
                                 let tc_id = tc.get("id").and_then(|v| v.as_str());
@@ -362,9 +354,8 @@ impl Model for OpenAIHttpModel {
                                 if let Some(id) = tc_id {
                                     // Flush previous tool if any
                                     if let Some(prev_id) = current_tool_id.take() {
-                                        let input: Value =
-                                            serde_json::from_str(&current_tool_args)
-                                                .unwrap_or(json!({}));
+                                        let input: Value = serde_json::from_str(&current_tool_args)
+                                            .unwrap_or(json!({}));
                                         let _ = tx
                                             .send(Ok(StreamChunk::ToolUseEnd {
                                                 id: prev_id,
@@ -414,13 +405,9 @@ impl Model for OpenAIHttpModel {
 
             // If stream ended without [DONE], send MessageStop anyway
             if let Some(tool_id) = current_tool_id.take() {
-                let input: Value =
-                    serde_json::from_str(&current_tool_args).unwrap_or(json!({}));
+                let input: Value = serde_json::from_str(&current_tool_args).unwrap_or(json!({}));
                 let _ = tx
-                    .send(Ok(StreamChunk::ToolUseEnd {
-                        id: tool_id,
-                        input,
-                    }))
+                    .send(Ok(StreamChunk::ToolUseEnd { id: tool_id, input }))
                     .await;
             }
             let _ = tx

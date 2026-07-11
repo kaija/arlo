@@ -189,7 +189,9 @@ mod tests {
     async fn file_edit_tool_replaces_unique_match() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("doc.md");
-        fs::write(&file_path, "# Old Heading\n\nBody text.").await.unwrap();
+        fs::write(&file_path, "# Old Heading\n\nBody text.")
+            .await
+            .unwrap();
 
         let tool = FileEditTool::new();
         let ctx = make_context_with_dir(dir.path());

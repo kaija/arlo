@@ -320,10 +320,7 @@ mod tests {
         assert!(!info.is_last_child());
         assert_eq!(info.first_child_tag(), Some("a"));
         assert_eq!(info.first_child_text_content(), Some("link text"));
-        assert_eq!(
-            info.first_child_attr("href"),
-            Some("https://example.com")
-        );
+        assert_eq!(info.first_child_attr("href"), Some("https://example.com"));
         assert_eq!(info.text_content(), "Hello world");
         assert!(!info.is_inside_pre());
     }

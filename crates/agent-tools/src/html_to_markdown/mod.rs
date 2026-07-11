@@ -239,9 +239,11 @@ impl HtmlToMarkdown {
         let parent_attrs = node
             .parent()
             .and_then(|p| match p.value() {
-                Node::Element(el) => {
-                    Some(el.attrs().map(|(k, v)| (k.to_string(), v.to_string())).collect())
-                }
+                Node::Element(el) => Some(
+                    el.attrs()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ),
                 _ => None,
             })
             .unwrap_or_default();
@@ -253,8 +255,7 @@ impl HtmlToMarkdown {
         let has_next_sibling = has_next_element_sibling(node);
 
         // First child info
-        let (first_child_tag, first_child_text, first_child_attrs) =
-            compute_first_child_info(node);
+        let (first_child_tag, first_child_text, first_child_attrs) = compute_first_child_info(node);
 
         // Flanking whitespace (for inline elements)
         let flanking_whitespace = if !is_block {
@@ -275,7 +276,15 @@ impl HtmlToMarkdown {
             inside_pre,
         };
 
-        NodeInfo::new(tag.to_string(), is_block, is_code, is_blank, flanking_whitespace, attrs, context)
+        NodeInfo::new(
+            tag.to_string(),
+            is_block,
+            is_code,
+            is_blank,
+            flanking_whitespace,
+            attrs,
+            context,
+        )
     }
 
     /// Post-process the converted output.
@@ -291,9 +300,7 @@ impl HtmlToMarkdown {
         }
 
         // Trim leading whitespace characters (tabs, \r, \n)
-        let trimmed_start = output.trim_start_matches(|c: char| {
-            c == '\t' || c == '\r' || c == '\n'
-        });
+        let trimmed_start = output.trim_start_matches(['\t', '\r', '\n']);
         let start_offset = output.len() - trimmed_start.len();
         output = output[start_offset..].to_string();
 
@@ -411,17 +418,14 @@ fn compute_is_blank(node: &NodeRef<Node>, text_content: &str) -> bool {
 /// Check if any descendant is a void element or meaningful-when-blank element.
 fn has_meaningful_descendant(node: &NodeRef<Node>) -> bool {
     for child in node.children() {
-        match child.value() {
-            Node::Element(el) => {
-                let name = el.name();
-                if is_void_element(name) || is_meaningful_when_blank(name) {
-                    return true;
-                }
-                if has_meaningful_descendant(&child) {
-                    return true;
-                }
+        if let Node::Element(el) = child.value() {
+            let name = el.name();
+            if is_void_element(name) || is_meaningful_when_blank(name) {
+                return true;
             }
-            _ => {}
+            if has_meaningful_descendant(&child) {
+                return true;
+            }
         }
     }
     false
@@ -538,7 +542,10 @@ mod tests {
 
     #[test]
     fn test_smart_join_no_newlines() {
-        assert_eq!(smart_join("hello".to_string(), "world".to_string()), "helloworld");
+        assert_eq!(
+            smart_join("hello".to_string(), "world".to_string()),
+            "helloworld"
+        );
     }
 
     #[test]
@@ -652,8 +659,8 @@ mod tests {
     #[test]
     fn test_convert_image() {
         let converter = HtmlToMarkdown::new();
-        let result =
-            converter.convert("<p><img src=\"https://example.com/img.png\" alt=\"A picture\" /></p>");
+        let result = converter
+            .convert("<p><img src=\"https://example.com/img.png\" alt=\"A picture\" /></p>");
         assert_eq!(result, "![A picture](https://example.com/img.png)");
     }
 
@@ -810,7 +817,12 @@ mod tests {
             node.tag_name() == "p"
         }
 
-        fn replacement(&self, content: &str, _node: &node_info::NodeInfo, _options: &options::Options) -> String {
+        fn replacement(
+            &self,
+            content: &str,
+            _node: &node_info::NodeInfo,
+            _options: &options::Options,
+        ) -> String {
             format!("\n\n[UPPER:{}]\n\n", content.to_uppercase())
         }
     }
@@ -823,7 +835,12 @@ mod tests {
             node.tag_name() == "div"
         }
 
-        fn replacement(&self, content: &str, _node: &node_info::NodeInfo, _options: &options::Options) -> String {
+        fn replacement(
+            &self,
+            content: &str,
+            _node: &node_info::NodeInfo,
+            _options: &options::Options,
+        ) -> String {
             format!("\n\n[DIV:{}]\n\n", content)
         }
     }
@@ -836,7 +853,12 @@ mod tests {
             node.tag_name() == "span"
         }
 
-        fn replacement(&self, content: &str, _node: &node_info::NodeInfo, _options: &options::Options) -> String {
+        fn replacement(
+            &self,
+            content: &str,
+            _node: &node_info::NodeInfo,
+            _options: &options::Options,
+        ) -> String {
             format!("[SPAN:{}]", content)
         }
     }
@@ -857,7 +879,8 @@ mod tests {
         // Use a tag that has NO primary built-in rule so the remove rule applies
         converter.remove(RuleFilter::Tag("aside".to_string()));
 
-        let result = converter.convert("<div><aside>This should be removed</aside><h1>Title</h1></div>");
+        let result =
+            converter.convert("<div><aside>This should be removed</aside><h1>Title</h1></div>");
         // The <aside> has no primary rule, so remove rule kicks in
         assert_eq!(result, "# Title");
     }
@@ -871,7 +894,8 @@ mod tests {
         ]));
 
         // <nav> and <footer> have no primary rules, so remove applies
-        let result = converter.convert("<div><nav>menu</nav><p>Content</p><footer>foot</footer></div>");
+        let result =
+            converter.convert("<div><nav>menu</nav><p>Content</p><footer>foot</footer></div>");
         assert_eq!(result, "Content");
     }
 
@@ -946,7 +970,10 @@ mod tests {
         // noscript
         assert_eq!(converter.convert("<noscript>Enable JS</noscript>"), "");
         // iframe
-        assert_eq!(converter.convert("<iframe src=\"https://example.com\"></iframe>"), "");
+        assert_eq!(
+            converter.convert("<iframe src=\"https://example.com\"></iframe>"),
+            ""
+        );
         // svg
         assert_eq!(converter.convert("<svg><circle r=\"5\"/></svg>"), "");
         // canvas
@@ -961,14 +988,17 @@ mod tests {
     fn test_disallowed_elements_nested_content_suppressed() {
         let converter = HtmlToMarkdown::new();
         // Nested content within script should also be suppressed
-        let result = converter.convert("<div><script><p>Should not appear</p></script><p>Visible</p></div>");
+        let result =
+            converter.convert("<div><script><p>Should not appear</p></script><p>Visible</p></div>");
         assert_eq!(result, "Visible");
     }
 
     #[test]
     fn test_disallowed_elements_dont_affect_other_content() {
         let converter = HtmlToMarkdown::new();
-        let result = converter.convert("<div><style>.x{}</style><h1>Title</h1><script>bad();</script><p>Content</p></div>");
+        let result = converter.convert(
+            "<div><style>.x{}</style><h1>Title</h1><script>bad();</script><p>Content</p></div>",
+        );
         assert_eq!(result, "# Title\n\nContent");
     }
 

@@ -135,10 +135,7 @@ mod tests {
         let tool = FileReadTool::new();
         let ctx = make_context_with_dir(&PathBuf::from("/tmp"));
         let result = tool
-            .execute(
-                json!({"path": file_path.to_str().unwrap()}),
-                &ctx,
-            )
+            .execute(json!({"path": file_path.to_str().unwrap()}), &ctx)
             .await;
 
         assert!(result.is_ok());

@@ -67,10 +67,10 @@ fn handle_tasks_list(state: &mut AppState) {
     let tasks = match block_on_async(store.list_unacknowledged_terminal()) {
         Ok(mut terminal_tasks) => {
             // Also get running and pending tasks
-            let running = block_on_async(store.list_tasks(Some(TaskStatus::Running)))
-                .unwrap_or_default();
-            let pending = block_on_async(store.list_tasks(Some(TaskStatus::Pending)))
-                .unwrap_or_default();
+            let running =
+                block_on_async(store.list_tasks(Some(TaskStatus::Running))).unwrap_or_default();
+            let pending =
+                block_on_async(store.list_tasks(Some(TaskStatus::Pending))).unwrap_or_default();
 
             let mut all_tasks = Vec::new();
             all_tasks.extend(running);
@@ -243,16 +243,14 @@ fn handle_todos_list(state: &mut AppState) {
 /// Uses `tokio::task::block_in_place` with the current runtime handle to avoid
 /// blocking the async executor.
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(f)
-    })
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{CreateTaskParams, InMemoryTaskStore, TaskStore, TaskType};
     use std::sync::Arc;
-    use agent_core::{InMemoryTaskStore, CreateTaskParams, TaskStore, TaskType};
 
     /// Helper to create an AppState with a fresh InMemoryTaskStore for testing.
     fn test_state() -> AppState {
@@ -340,7 +338,9 @@ mod tests {
         let mut state = test_state();
         let result = try_handle_slash_command("/tasks ack", &mut state);
         assert_eq!(result, Some(UpdateResult::Continue));
-        assert!(state.output_buffer[0].text.contains("Acknowledged 0 task(s)"));
+        assert!(state.output_buffer[0]
+            .text
+            .contains("Acknowledged 0 task(s)"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,14 +357,20 @@ mod tests {
         let store = state.task_store.clone().unwrap();
 
         // Create a task and transition it to running
-        let id = store.create_task(CreateTaskParams {
-            description: "Test background task".to_string(),
-            task_type: TaskType::SubAgent,
-            dependencies: vec![],
-            max_retries: 0,
-        }).await.unwrap();
+        let id = store
+            .create_task(CreateTaskParams {
+                description: "Test background task".to_string(),
+                task_type: TaskType::SubAgent,
+                dependencies: vec![],
+                max_retries: 0,
+            })
+            .await
+            .unwrap();
 
-        store.transition_task(&id, agent_core::TaskStatus::Running, None).await.unwrap();
+        store
+            .transition_task(&id, agent_core::TaskStatus::Running, None)
+            .await
+            .unwrap();
 
         let result = try_handle_slash_command("/tasks", &mut state);
         assert_eq!(result, Some(UpdateResult::Continue));
@@ -377,7 +383,10 @@ mod tests {
         let mut state = test_state();
         let store = state.task_store.clone().unwrap();
 
-        store.add_todo("Write tests".to_string(), None).await.unwrap();
+        store
+            .add_todo("Write tests".to_string(), None)
+            .await
+            .unwrap();
         store.add_todo("Review PR".to_string(), None).await.unwrap();
 
         let result = try_handle_slash_command("/todos", &mut state);
@@ -393,18 +402,33 @@ mod tests {
         let store = state.task_store.clone().unwrap();
 
         // Create and complete a task
-        let id = store.create_task(CreateTaskParams {
-            description: "Done task".to_string(),
-            task_type: TaskType::SubAgent,
-            dependencies: vec![],
-            max_retries: 0,
-        }).await.unwrap();
-        store.transition_task(&id, agent_core::TaskStatus::Running, None).await.unwrap();
-        store.transition_task(&id, agent_core::TaskStatus::Completed, Some("output".to_string())).await.unwrap();
+        let id = store
+            .create_task(CreateTaskParams {
+                description: "Done task".to_string(),
+                task_type: TaskType::SubAgent,
+                dependencies: vec![],
+                max_retries: 0,
+            })
+            .await
+            .unwrap();
+        store
+            .transition_task(&id, agent_core::TaskStatus::Running, None)
+            .await
+            .unwrap();
+        store
+            .transition_task(
+                &id,
+                agent_core::TaskStatus::Completed,
+                Some("output".to_string()),
+            )
+            .await
+            .unwrap();
 
         let result = try_handle_slash_command("/tasks ack", &mut state);
         assert_eq!(result, Some(UpdateResult::Continue));
-        assert!(state.output_buffer[0].text.contains("Acknowledged 1 task(s)"));
+        assert!(state.output_buffer[0]
+            .text
+            .contains("Acknowledged 1 task(s)"));
 
         // Verify it's actually acknowledged
         let unacked = store.list_unacknowledged_terminal().await.unwrap();
@@ -415,9 +439,9 @@ mod tests {
 
     use proptest::prelude::*;
 
-    /// Feature: task-manager-tui-integration, Property 13: Slash command routing
-    /// — Input starting with `/` never produces `StartRun`
-    /// **Validates: Requirements 4.5, 4.6, 4.9**
+    // Feature: task-manager-tui-integration, Property 13: Slash command routing
+    // — Input starting with `/` never produces `StartRun`
+    // **Validates: Requirements 4.5, 4.6, 4.9**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -437,20 +461,17 @@ mod tests {
                 prop_assert!(result.is_some(), "Input '{}' was not handled as a slash command", input);
                 // And the result is never StartRun
                 let r = result.unwrap();
-                match r {
-                    UpdateResult::StartRun(_) => {
-                        prop_assert!(false, "Input '{}' produced StartRun, which violates Property 13", input);
-                    }
-                    _ => {} // Any other result is acceptable
+                if let UpdateResult::StartRun(_) = r {
+                    prop_assert!(false, "Input '{}' produced StartRun, which violates Property 13", input);
                 }
                 Ok(())
             })?;
         }
     }
 
-    /// Feature: task-manager-tui-integration, Property 14: Slash command whitespace tolerance
-    /// — Commands with extra whitespace match correctly
-    /// **Validates: Requirements 4.5, 4.6, 4.9**
+    // Feature: task-manager-tui-integration, Property 14: Slash command whitespace tolerance
+    // — Commands with extra whitespace match correctly
+    // **Validates: Requirements 4.5, 4.6, 4.9**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
@@ -489,9 +510,9 @@ mod tests {
         }
     }
 
-    /// Feature: task-manager-tui-integration, Property 15: Unknown slash command error
-    /// — Unrecognized commands produce Error span listing available commands
-    /// **Validates: Requirements 4.5, 4.6, 4.9**
+    // Feature: task-manager-tui-integration, Property 15: Unknown slash command error
+    // — Unrecognized commands produce Error span listing available commands
+    // **Validates: Requirements 4.5, 4.6, 4.9**
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]

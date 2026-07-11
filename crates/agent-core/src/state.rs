@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(cs.messages_removed, 0);
         assert_eq!(cs.last_compaction_turn, None);
         assert_eq!(cs.consecutive_failures, 0);
-        assert_eq!(cs.circuit_broken, false);
+        assert!(!cs.circuit_broken);
         assert_eq!(cs.last_token_count, None);
     }
 

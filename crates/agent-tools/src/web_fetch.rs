@@ -48,6 +48,12 @@ pub struct WebFetchTool {
     converter: HtmlToMarkdown,
 }
 
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebFetchTool {
     /// Create a new `WebFetchTool` with a preconfigured HTTP client (no auto-redirects),
     /// an empty URL cache, and a default HTML-to-markdown converter.
@@ -131,9 +137,7 @@ impl WebFetchTool {
                 .get(current_url.as_str())
                 .send()
                 .await
-                .map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Request failed: {}", e))
-                })?;
+                .map_err(|e| ToolError::ExecutionFailed(format!("Request failed: {}", e)))?;
 
             let status = response.status();
 
@@ -168,9 +172,7 @@ impl WebFetchTool {
                 if is_same_host(&original_host, &target_host) {
                     hops += 1;
                     if hops > MAX_REDIRECTS {
-                        return Err(ToolError::ExecutionFailed(
-                            "Too many redirects".to_string(),
-                        ));
+                        return Err(ToolError::ExecutionFailed("Too many redirects".to_string()));
                     }
                     current_url = target;
                     continue;
@@ -212,9 +214,8 @@ impl WebFetchTool {
             let mut stream = response.bytes_stream();
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Download error: {}", e))
-                })?;
+                let chunk = chunk
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Download error: {}", e)))?;
                 body_bytes.extend_from_slice(&chunk);
                 if body_bytes.len() as u64 > MAX_BODY_SIZE {
                     return Err(ToolError::ExecutionFailed(format!(
@@ -255,9 +256,8 @@ pub fn validate_and_normalize_url(raw: &str) -> Result<Url, ToolError> {
     }
 
     // Parse
-    let mut parsed = Url::parse(raw).map_err(|e| {
-        ToolError::InvalidInput(format!("Malformed URL: {}", e))
-    })?;
+    let mut parsed =
+        Url::parse(raw).map_err(|e| ToolError::InvalidInput(format!("Malformed URL: {}", e)))?;
 
     // Credentials check
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -290,10 +290,7 @@ pub fn validate_and_normalize_url(raw: &str) -> Result<Url, ToolError> {
 pub fn is_same_host(original: &str, target: &str) -> bool {
     let normalize = |h: &str| {
         let lower = h.to_lowercase();
-        lower
-            .strip_prefix("www.")
-            .unwrap_or(&lower)
-            .to_string()
+        lower.strip_prefix("www.").unwrap_or(&lower).to_string()
     };
     normalize(original) == normalize(target)
 }
@@ -594,7 +591,11 @@ mod tests {
         ];
 
         for ct in &non_html_types {
-            assert!(!ct.contains("text/html"), "Unexpected HTML match for: {}", ct);
+            assert!(
+                !ct.contains("text/html"),
+                "Unexpected HTML match for: {}",
+                ct
+            );
         }
 
         // Content types that SHOULD trigger conversion
@@ -729,8 +730,14 @@ mod tests {
         tool.set_cached("https://a.com", "content-a").await;
         tool.set_cached("https://b.com", "content-b").await;
 
-        assert_eq!(tool.get_cached("https://a.com").await, Some("content-a".to_string()));
-        assert_eq!(tool.get_cached("https://b.com").await, Some("content-b".to_string()));
+        assert_eq!(
+            tool.get_cached("https://a.com").await,
+            Some("content-a".to_string())
+        );
+        assert_eq!(
+            tool.get_cached("https://b.com").await,
+            Some("content-b".to_string())
+        );
         assert_eq!(tool.get_cached("https://c.com").await, None);
     }
 
@@ -742,10 +749,13 @@ mod tests {
         // Directly insert an expired entry (16 minutes ago, beyond 15-minute TTL)
         {
             let mut cache = tool.cache.write().await;
-            cache.insert(url.to_string(), CacheEntry {
-                content: "old content".to_string(),
-                inserted_at: Instant::now() - Duration::from_secs(16 * 60),
-            });
+            cache.insert(
+                url.to_string(),
+                CacheEntry {
+                    content: "old content".to_string(),
+                    inserted_at: Instant::now() - Duration::from_secs(16 * 60),
+                },
+            );
         }
 
         // Should not be returned because it's past the 15-minute TTL
@@ -760,12 +770,18 @@ mod tests {
         // Directly insert a fresh entry (1 minute ago, within 15-minute TTL)
         {
             let mut cache = tool.cache.write().await;
-            cache.insert(url.to_string(), CacheEntry {
-                content: "fresh content".to_string(),
-                inserted_at: Instant::now() - Duration::from_secs(60),
-            });
+            cache.insert(
+                url.to_string(),
+                CacheEntry {
+                    content: "fresh content".to_string(),
+                    inserted_at: Instant::now() - Duration::from_secs(60),
+                },
+            );
         }
 
-        assert_eq!(tool.get_cached(url).await, Some("fresh content".to_string()));
+        assert_eq!(
+            tool.get_cached(url).await,
+            Some("fresh content".to_string())
+        );
     }
 }

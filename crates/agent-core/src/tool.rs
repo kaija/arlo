@@ -250,10 +250,7 @@ mod tests {
         }
 
         fn concurrency(&self, input: &serde_json::Value) -> Concurrency {
-            let cmd = input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if cmd.starts_with("ls") || cmd.starts_with("cat") || cmd.starts_with("echo") {
                 Concurrency::Safe
             } else {
@@ -380,10 +377,7 @@ mod tests {
         assert_eq!(tool.name(), "echo");
         assert_eq!(tool.description(), "Echoes back the input text");
         assert!(tool.parameters_schema().is_object());
-        assert_eq!(
-            tool.concurrency(&json!({"text": "hi"})),
-            Concurrency::Safe
-        );
+        assert_eq!(tool.concurrency(&json!({"text": "hi"})), Concurrency::Safe);
     }
 
     #[tokio::test]
@@ -427,10 +421,7 @@ mod tests {
         assert!(tool.error_cascades());
         assert!(tool.is_enabled());
         assert_eq!(tool.approval_requirement(), ApprovalRequirement::Always);
-        assert_eq!(
-            tool.concurrency(&json!({})),
-            Concurrency::Exclusive
-        );
+        assert_eq!(tool.concurrency(&json!({})), Concurrency::Exclusive);
     }
 
     #[tokio::test]

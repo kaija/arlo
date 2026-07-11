@@ -15,9 +15,7 @@ use proptest::prelude::*;
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-use agent_core::{
-    Concurrency, StreamingToolExecutor, Tool, ToolContext, ToolError, ToolOutput,
-};
+use agent_core::{Concurrency, StreamingToolExecutor, Tool, ToolContext, ToolError, ToolOutput};
 
 /// Recorded execution interval for a tool.
 #[derive(Debug, Clone)]
@@ -239,7 +237,6 @@ proptest! {
         })?;
     }
 }
-
 
 // --- Property 5: Tool result ordering preservation ---
 

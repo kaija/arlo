@@ -12,11 +12,10 @@
 use proptest::prelude::*;
 use serde_json::json;
 
-use agent_core::{
-    CompactionLayerConfig, CompactionPipeline, CompactionState, ContentBlock, Message,
-    ToolUseBlock,
-};
 use agent_core::compaction::tokens::estimate_tokens;
+use agent_core::{
+    CompactionLayerConfig, CompactionPipeline, CompactionState, ContentBlock, Message, ToolUseBlock,
+};
 
 // ============================================================================
 // Helpers
@@ -68,10 +67,7 @@ fn tool_result_msg(tool_use_id: &str, content: &str) -> Message {
 
 /// Create messages with old tool results that tools_compact can clear.
 /// Each old turn has a user msg + assistant tool_use + tool_result with big content.
-fn messages_with_clearable_tool_results(
-    num_old_turns: u32,
-    content_size: usize,
-) -> Vec<Message> {
+fn messages_with_clearable_tool_results(num_old_turns: u32, content_size: usize) -> Vec<Message> {
     let big_content = "x".repeat(content_size);
     let mut messages = Vec::new();
 
@@ -146,9 +142,15 @@ async fn test_property12_successful_compaction_event_and_state() {
 
     // Event completeness checks
     assert!(!event.stage.is_empty(), "stage name must be non-empty");
-    assert!(event.messages_affected > 0, "messages_affected must be positive");
+    assert!(
+        event.messages_affected > 0,
+        "messages_affected must be positive"
+    );
     assert!(event.tokens_before > 0, "tokens_before must be positive");
-    assert!(event.tokens_after < event.tokens_before, "tokens_after < tokens_before");
+    assert!(
+        event.tokens_after < event.tokens_before,
+        "tokens_after < tokens_before"
+    );
 
     // State update checks
     assert_eq!(state.total_compactions, 1);
@@ -264,7 +266,10 @@ async fn test_property13_relative_ordering_preserved() {
                 pos_i < pos_j,
                 "Relative order violated: message at after-index {} was at before-pos {}, \
                  message at after-index {} was at before-pos {}",
-                i, pos_i, j, pos_j
+                i,
+                pos_i,
+                j,
+                pos_j
             );
         }
     }
@@ -509,11 +514,13 @@ async fn test_property15_summary_insertion_after_last_system_msg() {
     let mut memory_file = NamedTempFile::new().unwrap();
     write!(memory_file, "This is the session memory summary content.").unwrap();
 
-    let mut config = CompactionLayerConfig::default();
-    config.session_memory_path = Some(memory_file.path().to_path_buf());
-    config.session_memory_min_tokens = 1;
-    config.session_memory_min_messages = 2;
-    config.session_memory_max_preserved_tokens = 100; // very small to force removal
+    let config = CompactionLayerConfig {
+        session_memory_path: Some(memory_file.path().to_path_buf()),
+        session_memory_min_tokens: 1,
+        session_memory_min_messages: 2,
+        session_memory_max_preserved_tokens: 100, // very small to force removal
+        ..Default::default()
+    };
 
     let mut messages = vec![
         system_msg("First system instruction"),
@@ -521,8 +528,14 @@ async fn test_property15_summary_insertion_after_last_system_msg() {
     ];
     // Add enough messages to pass guards and have messages to remove
     for i in 0..10 {
-        messages.push(user_msg(&format!("User message {} with some padding text", i)));
-        messages.push(assistant_msg(&format!("Assistant response {} with text", i)));
+        messages.push(user_msg(&format!(
+            "User message {} with some padding text",
+            i
+        )));
+        messages.push(assistant_msg(&format!(
+            "Assistant response {} with text",
+            i
+        )));
     }
 
     let mut state = CompactionState::default();
@@ -543,7 +556,10 @@ async fn test_property15_summary_insertion_after_last_system_msg() {
         )
         .await;
 
-    assert!(result.is_some(), "Compaction should succeed via session_memory");
+    assert!(
+        result.is_some(),
+        "Compaction should succeed via session_memory"
+    );
     let event = result.unwrap();
     assert_eq!(event.stage, "session_memory");
 
@@ -565,7 +581,7 @@ async fn test_property15_summary_insertion_after_last_system_msg() {
             _ => false,
         })
         .map(|(idx, _)| idx)
-        .last()
+        .next_back()
         .expect("Original system messages should exist");
 
     // Summary must be immediately after the last original system message
@@ -592,9 +608,7 @@ async fn test_property15_summary_insertion_after_last_system_msg() {
 async fn test_property16_tool_pairs_preserved_in_retained_messages() {
     // After tools_compact, all messages remain (just content cleared).
     // Tool-use/tool-result pairs should both still be present.
-    let mut messages = vec![
-        system_msg("instruction"),
-    ];
+    let mut messages = vec![system_msg("instruction")];
     for i in 0..10u32 {
         messages.push(user_msg(&format!("Turn {}", i)));
         let tid = format!("tool_{}", i);

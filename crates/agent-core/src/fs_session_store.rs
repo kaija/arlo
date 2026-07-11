@@ -97,11 +97,7 @@ impl SessionStore for FsSessionStore {
         Ok(())
     }
 
-    async fn save(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-    ) -> Result<(), SessionStoreError> {
+    async fn save(&self, session_id: &str, messages: &[Message]) -> Result<(), SessionStoreError> {
         let path = self.path_for(session_id)?;
         self.ensure_root().await?;
         let buf = Self::serialize_lines(messages)?;
@@ -199,7 +195,10 @@ mod tests {
     #[tokio::test]
     async fn save_overwrites() {
         let (_dir, store) = store();
-        store.append("s1", &[user_msg("a"), user_msg("b")]).await.unwrap();
+        store
+            .append("s1", &[user_msg("a"), user_msg("b")])
+            .await
+            .unwrap();
         store.save("s1", &[user_msg("compacted")]).await.unwrap();
         let loaded = store.load("s1").await.unwrap();
         assert_eq!(loaded, vec![user_msg("compacted")]);

@@ -114,7 +114,7 @@ impl PermissionEngine {
     pub fn with_static_allow(mut self, allow: Vec<String>) -> Self {
         self.static_allow = allow
             .into_iter()
-            .map(|s| ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)))
+            .map(|s| ToolPattern::parse(&s).unwrap_or(ToolPattern::Bare(s)))
             .collect();
         self
     }
@@ -126,7 +126,7 @@ impl PermissionEngine {
     pub fn with_static_deny(mut self, deny: Vec<String>) -> Self {
         self.static_deny = deny
             .into_iter()
-            .map(|s| ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)))
+            .map(|s| ToolPattern::parse(&s).unwrap_or(ToolPattern::Bare(s)))
             .collect();
         self
     }
@@ -148,14 +148,14 @@ impl PermissionEngine {
     pub fn add_static_allow(&mut self, tool_name: impl Into<String>) {
         let s = tool_name.into();
         self.static_allow
-            .push(ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)));
+            .push(ToolPattern::parse(&s).unwrap_or(ToolPattern::Bare(s)));
     }
 
     /// Add a tool name to the static deny list.
     pub fn add_static_deny(&mut self, tool_name: impl Into<String>) {
         let s = tool_name.into();
         self.static_deny
-            .push(ToolPattern::parse(&s).unwrap_or_else(|| ToolPattern::Bare(s)));
+            .push(ToolPattern::parse(&s).unwrap_or(ToolPattern::Bare(s)));
     }
 
     /// Get the current permission mode.
@@ -194,7 +194,7 @@ impl PermissionEngine {
             }
             PermissionMode::DenyAll => {
                 return PermissionDecision::Deny {
-                    message: format!("All tool calls are denied (mode: DenyAll)"),
+                    message: "All tool calls are denied (mode: DenyAll)".to_string(),
                     reason: "mode:deny_all".to_string(),
                 };
             }
@@ -204,20 +204,32 @@ impl PermissionEngine {
         }
 
         // Layer 2: Static rules — evaluate with tool_input for compound pattern support
-        if self.static_deny.iter().any(|pat| pat.matches(tool_name, tool_input)) {
+        if self
+            .static_deny
+            .iter()
+            .any(|pat| pat.matches(tool_name, tool_input))
+        {
             return PermissionDecision::Deny {
                 message: format!("Tool '{}' is in the static deny list", tool_name),
                 reason: "static_deny".to_string(),
             };
         }
-        if self.static_allow.iter().any(|pat| pat.matches(tool_name, tool_input)) {
+        if self
+            .static_allow
+            .iter()
+            .any(|pat| pat.matches(tool_name, tool_input))
+        {
             return PermissionDecision::Allow {
                 reason: Some("static_allow".to_string()),
             };
         }
 
         // Layer 3: Session rules — check local session_allows first, then shared store
-        if self.session_allows.iter().any(|pat| pat.matches(tool_name, tool_input)) {
+        if self
+            .session_allows
+            .iter()
+            .any(|pat| pat.matches(tool_name, tool_input))
+        {
             return PermissionDecision::Allow {
                 reason: Some("session_allow".to_string()),
             };
@@ -246,10 +258,7 @@ impl PermissionEngine {
                 context: "always".to_string(),
             },
             ApprovalRequirement::Conditional(condition) => PermissionDecision::NeedsApproval {
-                description: format!(
-                    "Tool '{}' requires approval: {}",
-                    tool_name, condition
-                ),
+                description: format!("Tool '{}' requires approval: {}", tool_name, condition),
                 call_id: String::new(),
                 context: condition.clone(),
             },
@@ -291,8 +300,14 @@ impl PermissionEngine {
     /// Check if a tool call is covered by any session grant.
     ///
     /// Checks local session_allows patterns against the given tool name and optional input.
-    pub fn has_session_allow(&self, tool_name: &str, tool_input: Option<&serde_json::Value>) -> bool {
-        self.session_allows.iter().any(|pat| pat.matches(tool_name, tool_input))
+    pub fn has_session_allow(
+        &self,
+        tool_name: &str,
+        tool_input: Option<&serde_json::Value>,
+    ) -> bool {
+        self.session_allows
+            .iter()
+            .any(|pat| pat.matches(tool_name, tool_input))
     }
 
     /// Clear all session-scoped allow rules.
@@ -318,10 +333,10 @@ mod tests {
     // Property-based tests using proptest
     mod property_tests {
         use super::*;
-        use proptest::prelude::*;
         use proptest::collection::vec as prop_vec;
+        use proptest::prelude::*;
 
-        /// **Validates: Requirements 12.3, 12.4, 12.5, 12.6, 12.7**
+        // **Validates: Requirements 12.3, 12.4, 12.5, 12.6, 12.7**
 
         /// Strategy for generating valid tool names (non-empty alphanumeric + underscore)
         fn tool_name_strategy() -> impl Strategy<Value = String> {
@@ -333,7 +348,7 @@ mod tests {
             prop_oneof![
                 Just(ApprovalRequirement::Never),
                 Just(ApprovalRequirement::Always),
-                "[a-z ]{1,20}".prop_map(|s| ApprovalRequirement::Conditional(s)),
+                "[a-z ]{1,20}".prop_map(ApprovalRequirement::Conditional),
             ]
         }
 
@@ -940,7 +955,11 @@ mod tests {
 
         let decision = engine.check("dangerous_tool", &ApprovalRequirement::Always, None);
         match decision {
-            PermissionDecision::NeedsApproval { description, context, .. } => {
+            PermissionDecision::NeedsApproval {
+                description,
+                context,
+                ..
+            } => {
                 assert!(description.contains("dangerous_tool"));
                 assert_eq!(context, "always");
             }
@@ -958,7 +977,11 @@ mod tests {
             None,
         );
         match decision {
-            PermissionDecision::NeedsApproval { description, context, .. } => {
+            PermissionDecision::NeedsApproval {
+                description,
+                context,
+                ..
+            } => {
                 assert!(description.contains("shell"));
                 assert!(description.contains("writing to /etc"));
                 assert_eq!(context, "writing to /etc");
@@ -1047,6 +1070,8 @@ mod tests {
 
         // Subsequent calls: allowed via session rule
         let decision = engine.check("shell", &ApprovalRequirement::Always, None);
-        assert!(matches!(decision, PermissionDecision::Allow { reason } if reason == Some("session_allow".to_string())));
+        assert!(
+            matches!(decision, PermissionDecision::Allow { reason } if reason == Some("session_allow".to_string()))
+        );
     }
 }

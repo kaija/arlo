@@ -126,7 +126,9 @@ mod tests {
     #[async_trait]
     impl Model for MockModel {
         async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelError> {
-            Err(ModelError::Connection("mock: stream not implemented".to_string()))
+            Err(ModelError::Connection(
+                "mock: stream not implemented".to_string(),
+            ))
         }
 
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -236,16 +238,24 @@ mod tests {
     /// Strategy to generate arbitrary MockModel parameters.
     fn arb_mock_model() -> impl Strategy<Value = MockModel> {
         (
-            "[a-z][a-z0-9-]{0,20}",       // name
-            "[a-z][a-z0-9-]{0,15}",       // provider
-            1usize..=1_000_000usize,       // context_window
-            1usize..=100_000usize,         // max_output_tokens
-            any::<bool>(),                 // supports_tools
-            0.0f64..1000.0f64,             // input_cost
-            0.0f64..1000.0f64,             // output_cost
+            "[a-z][a-z0-9-]{0,20}",  // name
+            "[a-z][a-z0-9-]{0,15}",  // provider
+            1usize..=1_000_000usize, // context_window
+            1usize..=100_000usize,   // max_output_tokens
+            any::<bool>(),           // supports_tools
+            0.0f64..1000.0f64,       // input_cost
+            0.0f64..1000.0f64,       // output_cost
         )
             .prop_map(
-                |(name, provider, context_window, max_output_tokens, supports_tools, input_cost, output_cost)| {
+                |(
+                    name,
+                    provider,
+                    context_window,
+                    max_output_tokens,
+                    supports_tools,
+                    input_cost,
+                    output_cost,
+                )| {
                     MockModel {
                         name,
                         provider,
@@ -261,10 +271,7 @@ mod tests {
 
     /// Strategy to generate arbitrary override values (Option<usize>).
     fn arb_override() -> impl Strategy<Value = Option<usize>> {
-        prop_oneof![
-            Just(None),
-            (1usize..=2_000_000usize).prop_map(Some),
-        ]
+        prop_oneof![Just(None), (1usize..=2_000_000usize).prop_map(Some),]
     }
 
     proptest! {

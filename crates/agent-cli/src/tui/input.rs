@@ -311,9 +311,9 @@ mod tests {
     fn test_unicode_cursor_navigation() {
         let mut buf = InputBuffer::new();
         // Mix of 1-byte, 2-byte, 3-byte, and 4-byte chars
-        buf.insert('a');   // 1 byte
-        buf.insert('é');   // 2 bytes
-        buf.insert('中');  // 3 bytes
+        buf.insert('a'); // 1 byte
+        buf.insert('é'); // 2 bytes
+        buf.insert('中'); // 3 bytes
         buf.insert('🦀'); // 4 bytes
         assert_eq!(buf.cursor(), 10); // 1 + 2 + 3 + 4
 
@@ -341,7 +341,7 @@ mod tests {
         let mut buf = InputBuffer::new();
         buf.insert('あ'); // 3 bytes
         buf.insert('う'); // 3 bytes
-        buf.move_left();  // cursor before 'う'
+        buf.move_left(); // cursor before 'う'
         buf.insert('い'); // insert between
         assert_eq!(buf.content(), "あいう");
         assert_eq!(buf.cursor(), 6); // after 'い'
@@ -354,7 +354,7 @@ mod tests {
         buf.insert('い');
         buf.insert('う');
         buf.move_left(); // before 'う'
-        buf.backspace();  // remove 'い'
+        buf.backspace(); // remove 'い'
         assert_eq!(buf.content(), "あう");
         assert_eq!(buf.cursor(), 3); // after 'あ'
     }
@@ -377,11 +377,11 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        /// Property 13: Non-empty input submission — verify `take()` returns
-        /// the accumulated content and resets state.
-        ///
-        /// Insert each char one by one into a fresh InputBuffer, call take(),
-        /// and verify it equals the original string and the buffer is empty after.
+        // Property 13: Non-empty input submission — verify `take()` returns
+        // the accumulated content and resets state.
+        //
+        // Insert each char one by one into a fresh InputBuffer, call take(),
+        // and verify it equals the original string and the buffer is empty after.
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(100))]
             #[test]
@@ -423,9 +423,9 @@ mod tests {
             ]
         }
 
-        /// Cursor never exceeds content length — for any sequence of operations,
-        /// after each operation: cursor() <= content().len() and
-        /// content().is_char_boundary(cursor()) is true.
+        // Cursor never exceeds content length — for any sequence of operations,
+        // after each operation: cursor() <= content().len() and
+        // content().is_char_boundary(cursor()) is true.
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(100))]
             #[test]
@@ -457,9 +457,9 @@ mod tests {
             }
         }
 
-        /// Insert at any position produces correct string — generate a base string,
-        /// insert all chars, move cursor to a random valid position, insert a new char,
-        /// and verify resulting content has correct length and contains the inserted char.
+        // Insert at any position produces correct string — generate a base string,
+        // insert all chars, move cursor to a random valid position, insert a new char,
+        // and verify resulting content has correct length and contains the inserted char.
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(100))]
             #[test]

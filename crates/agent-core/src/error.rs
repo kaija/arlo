@@ -248,7 +248,10 @@ mod tests {
     fn from_model_error_to_run_error() {
         let model_err = ModelError::MaxOutputTokens;
         let run_err: RunError = model_err.into();
-        assert!(matches!(run_err, RunError::Model(ModelError::MaxOutputTokens)));
+        assert!(matches!(
+            run_err,
+            RunError::Model(ModelError::MaxOutputTokens)
+        ));
     }
 
     #[test]

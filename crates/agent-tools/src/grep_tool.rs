@@ -102,7 +102,7 @@ impl Tool for GrepTool {
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Task join error: {}", e)))?
-        .map_err(|e| ToolError::ExecutionFailed(e))?;
+        .map_err(ToolError::ExecutionFailed)?;
 
         Ok(ToolOutput::Text(results.join("\n")))
     }
@@ -122,12 +122,15 @@ fn search_files(
     }
 
     if !path.is_dir() {
-        return Err(format!("Path '{}' is not a file or directory", path.display()));
+        return Err(format!(
+            "Path '{}' is not a file or directory",
+            path.display()
+        ));
     }
 
     // Build the glob matcher for include filter if provided
     let include_glob = include_pattern
-        .map(|p| glob::Pattern::new(p))
+        .map(glob::Pattern::new)
         .transpose()
         .map_err(|e| format!("Invalid include pattern: {}", e))?;
 
@@ -273,8 +276,12 @@ mod tests {
     #[tokio::test]
     async fn grep_tool_with_include_filter() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("file.rs"), "fn hello()\n").await.unwrap();
-        fs::write(dir.path().join("file.txt"), "fn goodbye()\n").await.unwrap();
+        fs::write(dir.path().join("file.rs"), "fn hello()\n")
+            .await
+            .unwrap();
+        fs::write(dir.path().join("file.txt"), "fn goodbye()\n")
+            .await
+            .unwrap();
 
         let tool = GrepTool::new();
         let ctx = make_context_with_dir(dir.path());
@@ -295,9 +302,12 @@ mod tests {
     #[tokio::test]
     async fn grep_tool_single_file_path() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("target.txt"), "match here\nno match\nmatch again\n")
-            .await
-            .unwrap();
+        fs::write(
+            dir.path().join("target.txt"),
+            "match here\nno match\nmatch again\n",
+        )
+        .await
+        .unwrap();
 
         let tool = GrepTool::new();
         let ctx = make_context_with_dir(dir.path());

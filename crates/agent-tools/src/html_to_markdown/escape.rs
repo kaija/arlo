@@ -13,7 +13,7 @@ pub const MARKDOWN_SPECIAL_CHARS: &[char] = &['\\', '*', '_', '`', '[', ']', '<'
 pub fn escape_markdown(input: &str) -> String {
     input
         .split('\n')
-        .map(|line| escape_line(line))
+        .map(escape_line)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -121,10 +121,10 @@ fn consume_line_start_pattern(line: &str) -> Option<LineStartResult<'_>> {
     }
 
     // Check for blockquote: `> ` or bare `>`
-    if line.starts_with('>') {
+    if let Some(remainder) = line.strip_prefix('>') {
         return Some(LineStartResult {
             escaped: "\\>".to_string(),
-            remainder: &line[1..],
+            remainder,
         });
     }
 
@@ -244,15 +244,15 @@ mod tests {
 
     #[test]
     fn test_escape_link_destination_basic() {
-        assert_eq!(escape_link_destination("https://example.com"), "https://example.com");
+        assert_eq!(
+            escape_link_destination("https://example.com"),
+            "https://example.com"
+        );
         assert_eq!(
             escape_link_destination("https://example.com/path (1)"),
             "<https://example.com/path \\(1\\)>"
         );
-        assert_eq!(
-            escape_link_destination("a<b>c"),
-            "a\\<b\\>c"
-        );
+        assert_eq!(escape_link_destination("a<b>c"), "a\\<b\\>c");
     }
 
     #[test]
@@ -288,8 +288,7 @@ mod tests {
     fn special_char_string() -> impl Strategy<Value = String> {
         // Generate strings from a character set that includes all MARKDOWN_SPECIAL_CHARS
         // plus normal text characters
-        prop::string::string_regex(r"[ \\\*_`\[\]<>a-zA-Z0-9!@$%^&(){}\t]{1,80}")
-            .unwrap()
+        prop::string::string_regex(r"[ \\\*_`\[\]<>a-zA-Z0-9!@$%^&(){}\t]{1,80}").unwrap()
     }
 
     /// Strategy that generates strings starting with line-start patterns
@@ -297,9 +296,8 @@ mod tests {
     fn line_start_pattern_string() -> impl Strategy<Value = String> {
         prop_oneof![
             // Heading patterns: # through ######
-            (1..=6usize, "[a-zA-Z ]{0,30}").prop_map(|(n, rest)| {
-                format!("{} {}", "#".repeat(n), rest)
-            }),
+            (1..=6usize, "[a-zA-Z ]{0,30}")
+                .prop_map(|(n, rest)| { format!("{} {}", "#".repeat(n), rest) }),
             // Unordered list with dash
             "[a-zA-Z0-9 ]{1,30}".prop_map(|rest| format!("- {}", rest)),
             // Unordered list with plus
@@ -307,13 +305,10 @@ mod tests {
             // Blockquote
             "[a-zA-Z0-9 ]{1,30}".prop_map(|rest| format!("> {}", rest)),
             // Ordered list
-            (1..=99u32, "[a-zA-Z0-9 ]{1,30}").prop_map(|(n, rest)| {
-                format!("{}. {}", n, rest)
-            }),
+            (1..=99u32, "[a-zA-Z0-9 ]{1,30}").prop_map(|(n, rest)| { format!("{}. {}", n, rest) }),
             // Tilde fence (3+ tildes)
-            (3..=6usize, "[a-zA-Z0-9]{0,10}").prop_map(|(n, rest)| {
-                format!("{}{}", "~".repeat(n), rest)
-            }),
+            (3..=6usize, "[a-zA-Z0-9]{0,10}")
+                .prop_map(|(n, rest)| { format!("{}{}", "~".repeat(n), rest) }),
             // Setext heading underline (3+ equals)
             (3..=6usize).prop_map(|n| "=".repeat(n)),
         ]
