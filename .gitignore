@@ -3,3 +3,7 @@
 run*
 .arlo
 test
+
+web/dist/*
+!web/dist/.gitkeep
+web/node_modules/
