@@ -40,8 +40,8 @@ All paths relative to `crates/`.
 | TUI / CLI | `agent-cli/src/main.rs` (wiring, agent builder), `agent-cli/src/tui/` (approval UI in `approval.rs`, event loop in `event_loop.rs`) |
 
 Deep dives (read before touching the corresponding area):
-`doc/agent-framework.md` (full architecture, in Chinese), `doc/sub-agent-task-coordination.md`
-(sequence diagrams + known limits).
+`doc/agent-framework.md` (full architecture; zh-TW version in `agent-framework.zh-TW.md`),
+`doc/sub-agent-task-coordination.md` (sequence diagrams + known limits).
 
 ## Core model (read this before changing the loop)
 
