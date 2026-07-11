@@ -322,3 +322,70 @@ async fn second_connection_takes_over_and_first_is_closed() {
     let messages = snapshot["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2, "expected the user + assistant messages from tab A: {messages:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ticker_pushes_task_notice_on_terminal_transition() {
+    let store = Arc::new(InMemoryTaskStore::new());
+    let config = web::server::WebServerConfig {
+        provider: Arc::new(SingleModelProvider { model: Arc::new(EchoModel) }),
+        model: "mock".to_string(),
+        tools: vec![],
+        instructions: Instructions::Static("test agent".to_string()),
+        permission_mode: PermissionMode::Bypass,
+        task_store: store.clone() as Arc<dyn TaskStore>,
+        session_store: Arc::new(NullSessionStore) as Arc<dyn SessionStore>,
+        session_id: "test-session".to_string(),
+    };
+    let shared = Arc::new(web::session::SharedSessionState::new(Vec::new()));
+    let router = web::server::build_router(config, shared);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let mut ws = connect(addr).await;
+    recv_json(&mut ws).await; // MessagesSnapshot
+    recv_json(&mut ws).await; // task_snapshot (empty)
+    recv_json(&mut ws).await; // todo_snapshot (empty)
+
+    // Register and complete a task out-of-band, as SubAgentTool would.
+    let id = store
+        .create_task(agent_core::CreateTaskParams {
+            description: "background check".to_string(),
+            task_type: agent_core::TaskType::Background,
+            dependencies: vec![],
+            max_retries: 0,
+        })
+        .await
+        .unwrap();
+    store.transition_task(&id, agent_core::TaskStatus::Running, None).await.unwrap();
+    store
+        .transition_task(&id, agent_core::TaskStatus::Completed, Some("42 files".to_string()))
+        .await
+        .unwrap();
+
+    // The 500ms ticker should notice within a couple of ticks.
+    let mut saw_notice = false;
+    let mut saw_snapshot = false;
+    for _ in 0..10 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), recv_json(&mut ws))
+            .await
+            .expect("timed out waiting for ticker event");
+        if event["type"] == "Custom" && event["name"] == "arlo.task_notice" {
+            assert_eq!(event["value"]["taskId"], id.clone());
+            assert_eq!(event["value"]["status"], "Completed");
+            assert_eq!(event["value"]["summary"], "42 files");
+            saw_notice = true;
+        }
+        if event["type"] == "Custom" && event["name"] == "arlo.task_snapshot" {
+            let tasks = event["value"].as_array().unwrap();
+            if tasks.len() == 1 && tasks[0]["status"] == "Completed" {
+                saw_snapshot = true;
+            }
+        }
+        if saw_notice && saw_snapshot {
+            break;
+        }
+    }
+    assert!(saw_notice, "expected an arlo.task_notice event");
+    assert!(saw_snapshot, "expected an updated arlo.task_snapshot event");
+}

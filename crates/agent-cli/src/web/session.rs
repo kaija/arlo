@@ -1,11 +1,13 @@
 //! Per-WebSocket-connection session driver — the web analogue of
 //! `tui/mod.rs::run_tui_repl` + `tui/event_loop.rs`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_core::{
     run_stream, Agent, ApprovalResponse, ContentBlock, Input, Message as CoreMessage,
-    PermissionEngine, RunConfig, RunEvent,
+    PermissionEngine, RunConfig, RunEvent, TaskEntry, TaskId, TaskStatus, TodoItem,
 };
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures::{SinkExt, StreamExt};
@@ -76,19 +78,18 @@ async fn send_event(ws_tx: &mut (impl SinkExt<WsMessage, Error = axum::Error> + 
 async fn send_task_and_todo_snapshot(
     ws_tx: &mut (impl SinkExt<WsMessage, Error = axum::Error> + Unpin),
     task_store: &Arc<dyn agent_core::TaskStore>,
-) {
-    if let Ok(tasks) = task_store.list_tasks(None).await {
-        send_event(ws_tx, AguiEvent::Custom {
-            name: "arlo.task_snapshot".to_string(),
-            value: serde_json::to_value(&tasks).unwrap_or_default(),
-        }).await;
-    }
-    if let Ok(todos) = task_store.list_todos().await {
-        send_event(ws_tx, AguiEvent::Custom {
-            name: "arlo.todo_snapshot".to_string(),
-            value: serde_json::to_value(&todos).unwrap_or_default(),
-        }).await;
-    }
+) -> (Vec<TaskEntry>, Vec<TodoItem>) {
+    let tasks = task_store.list_tasks(None).await.unwrap_or_default();
+    send_event(ws_tx, AguiEvent::Custom {
+        name: "arlo.task_snapshot".to_string(),
+        value: serde_json::to_value(&tasks).unwrap_or_default(),
+    }).await;
+    let todos = task_store.list_todos().await.unwrap_or_default();
+    send_event(ws_tx, AguiEvent::Custom {
+        name: "arlo.todo_snapshot".to_string(),
+        value: serde_json::to_value(&todos).unwrap_or_default(),
+    }).await;
+    (tasks, todos)
 }
 
 fn spawn_run(
@@ -169,7 +170,12 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
 
     let history_snapshot = shared.history.lock().await.clone();
     send_event(&mut ws_tx, AguiEvent::MessagesSnapshot { messages: history_snapshot }).await;
-    send_task_and_todo_snapshot(&mut ws_tx, &config.task_store).await;
+    let (mut last_tasks, mut last_todos) = send_task_and_todo_snapshot(&mut ws_tx, &config.task_store).await;
+    let mut last_statuses: HashMap<TaskId, TaskStatus> =
+        last_tasks.iter().map(|t| (t.id.clone(), t.status)).collect();
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut current_run: Option<JoinHandle<()>> = None;
     let mut was_kicked = false;
@@ -240,6 +246,46 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
                 }
                 if is_run_finished {
                     *shared.run_active.lock().await = false;
+                }
+            }
+            _ = ticker.tick() => {
+                if let Ok(tasks) = config.task_store.list_tasks(None).await {
+                    for task in &tasks {
+                        let was_terminal = last_statuses.get(&task.id).is_some_and(TaskStatus::is_terminal);
+                        if task.status.is_terminal() && !was_terminal {
+                            let summary = match task.status {
+                                TaskStatus::Completed => task.output.clone().unwrap_or_default(),
+                                _ => task.last_error.clone().or_else(|| task.output.clone()).unwrap_or_default(),
+                            };
+                            send_event(&mut ws_tx, AguiEvent::Custom {
+                                name: "arlo.task_notice".to_string(),
+                                value: json!({
+                                    "taskId": task.id,
+                                    "status": task.status,
+                                    "description": task.description,
+                                    "summary": summary,
+                                }),
+                            }).await;
+                        }
+                    }
+                    last_statuses = tasks.iter().map(|t| (t.id.clone(), t.status)).collect();
+
+                    if tasks != last_tasks {
+                        send_event(&mut ws_tx, AguiEvent::Custom {
+                            name: "arlo.task_snapshot".to_string(),
+                            value: serde_json::to_value(&tasks).unwrap_or_default(),
+                        }).await;
+                        last_tasks = tasks;
+                    }
+                }
+                if let Ok(todos) = config.task_store.list_todos().await {
+                    if todos != last_todos {
+                        send_event(&mut ws_tx, AguiEvent::Custom {
+                            name: "arlo.todo_snapshot".to_string(),
+                            value: serde_json::to_value(&todos).unwrap_or_default(),
+                        }).await;
+                        last_todos = todos;
+                    }
                 }
             }
         }
