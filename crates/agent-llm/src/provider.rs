@@ -17,6 +17,7 @@ use agent_core::config_resolver::ResolvedProfile;
 use agent_core::error::ModelError;
 use agent_core::model::{Model, ModelProvider, ModelRequest, ModelResponse, ModelStream};
 
+use crate::anthropic_http::AnthropicHttpModel;
 use crate::openai_http::OpenAIHttpModel;
 
 /// A unified provider that routes model requests to the appropriate backend.
@@ -50,6 +51,10 @@ pub struct UnifiedProvider {
     #[cfg(feature = "anthropic")]
     anthropic_key: Option<String>,
 
+    /// Custom base URL for Anthropic-compatible endpoints.
+    #[cfg(feature = "anthropic")]
+    anthropic_base_url: Option<String>,
+
     /// Ollama host URL (present means Ollama provider is available).
     #[cfg(feature = "ollama")]
     ollama_host: Option<String>,
@@ -80,6 +85,9 @@ impl UnifiedProvider {
         #[cfg(feature = "anthropic")]
         let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
+        #[cfg(feature = "anthropic")]
+        let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+
         #[cfg(feature = "ollama")]
         let ollama_host = std::env::var("OLLAMA_HOST").ok();
 
@@ -101,6 +109,8 @@ impl UnifiedProvider {
             openai_base_url,
             #[cfg(feature = "anthropic")]
             anthropic_key,
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url,
             #[cfg(feature = "ollama")]
             ollama_host,
         };
@@ -124,6 +134,7 @@ impl UnifiedProvider {
         #[cfg(feature = "openai")] openai_key: Option<String>,
         #[cfg(feature = "openai")] openai_base_url: Option<String>,
         #[cfg(feature = "anthropic")] anthropic_key: Option<String>,
+        #[cfg(feature = "anthropic")] anthropic_base_url: Option<String>,
         #[cfg(feature = "ollama")] ollama_host: Option<String>,
     ) -> Result<Self, ModelError> {
         let provider = Self {
@@ -134,6 +145,8 @@ impl UnifiedProvider {
             openai_base_url,
             #[cfg(feature = "anthropic")]
             anthropic_key,
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url,
             #[cfg(feature = "ollama")]
             ollama_host,
         };
@@ -168,6 +181,8 @@ impl UnifiedProvider {
                 openai_base_url: profile.base_url.clone(),
                 #[cfg(feature = "anthropic")]
                 anthropic_key: None,
+                #[cfg(feature = "anthropic")]
+                anthropic_base_url: None,
                 #[cfg(feature = "ollama")]
                 ollama_host: None,
             },
@@ -179,6 +194,7 @@ impl UnifiedProvider {
                 #[cfg(feature = "openai")]
                 openai_base_url: None,
                 anthropic_key: profile.api_key.clone(),
+                anthropic_base_url: profile.base_url.clone(),
                 #[cfg(feature = "ollama")]
                 ollama_host: None,
             },
@@ -191,6 +207,8 @@ impl UnifiedProvider {
                 openai_base_url: None,
                 #[cfg(feature = "anthropic")]
                 anthropic_key: None,
+                #[cfg(feature = "anthropic")]
+                anthropic_base_url: None,
                 ollama_host: profile
                     .base_url
                     .clone()
@@ -370,11 +388,19 @@ impl ModelProvider for UnifiedProvider {
             }
             #[cfg(feature = "anthropic")]
             "anthropic" => {
-                // Anthropic native API not yet implemented — use stub
-                Ok(Arc::new(StubModel {
-                    model_name: bare_name,
-                    provider_name: provider,
-                }))
+                let api_key = self.anthropic_key.as_ref().ok_or_else(|| {
+                    ModelError::Connection("Anthropic API key not configured".to_string())
+                })?;
+                let base_url = self
+                    .anthropic_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.anthropic.com/v1")
+                    .to_string();
+                Ok(Arc::new(AnthropicHttpModel::new(
+                    bare_name,
+                    api_key.clone(),
+                    base_url,
+                )))
             }
             #[cfg(feature = "ollama")]
             "ollama" => {
@@ -401,8 +427,9 @@ impl ModelProvider for UnifiedProvider {
 }
 
 /// A stub Model implementation for providers that don't have HTTP implementations yet.
-/// Currently used for the native Anthropic Messages API (not the OpenAI-compatible proxy).
+/// Currently unused — kept for potential future use with new provider backends.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct StubModel {
     model_name: String,
     provider_name: String,
@@ -495,6 +522,8 @@ mod tests {
             openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: anthropic.map(|s| s.to_string()),
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url: None,
             #[cfg(feature = "ollama")]
             ollama_host: ollama.map(|s| s.to_string()),
         }
@@ -595,6 +624,8 @@ mod tests {
             openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url: None,
             #[cfg(feature = "ollama")]
             ollama_host: None,
         };
@@ -610,6 +641,8 @@ mod tests {
             openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url: None,
             #[cfg(feature = "ollama")]
             ollama_host: None,
         };
@@ -669,6 +702,8 @@ mod tests {
             None,
             #[cfg(feature = "anthropic")]
             None,
+            #[cfg(feature = "anthropic")]
+            None,
             #[cfg(feature = "ollama")]
             None,
         );
@@ -683,6 +718,8 @@ mod tests {
             #[cfg(feature = "openai")]
             Some("sk-test".to_string()),
             #[cfg(feature = "openai")]
+            None,
+            #[cfg(feature = "anthropic")]
             None,
             #[cfg(feature = "anthropic")]
             None,
@@ -878,6 +915,8 @@ mod prop_tests {
             openai_base_url: None,
             #[cfg(feature = "anthropic")]
             anthropic_key: Some("sk-ant-test-key".to_string()),
+            #[cfg(feature = "anthropic")]
+            anthropic_base_url: None,
             #[cfg(feature = "ollama")]
             ollama_host: None,
         }

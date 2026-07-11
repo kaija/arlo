@@ -12,6 +12,7 @@
 //! - `ollama` (optional): Enable local Ollama server backend
 //! - `all-providers`: Enable all provider backends
 
+pub mod anthropic_http;
 pub mod convert;
 pub mod model_override;
 pub mod openai_http;
@@ -19,6 +20,7 @@ pub mod provider;
 pub mod retry;
 
 pub use agent_core;
+pub use anthropic_http::AnthropicHttpModel;
 pub use model_override::ModelOverrideWrapper;
 pub use openai_http::OpenAIHttpModel;
 pub use provider::UnifiedProvider;
