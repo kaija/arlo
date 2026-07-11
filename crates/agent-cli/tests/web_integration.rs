@@ -219,28 +219,45 @@ async fn tool_call_requiring_approval_round_trips_through_websocket() {
         .await
         .unwrap();
 
-    let step_started = recv_json(&mut ws).await;
-    assert_eq!(step_started["type"], "StepStarted");
-
-    let tool_start = recv_json(&mut ws).await;
-    assert_eq!(tool_start["type"], "ToolCallStart");
-    assert_eq!(tool_start["toolCallName"], "always_ask");
-
-    // agent-core's run loop executes the tool eagerly (Phase 4) and only
-    // checks the permission engine afterward, in resolve_next_step — so
-    // ToolCallEnd/ToolCallResult arrive *before* the permission_request that
-    // gates whether the run continues to the next turn.
-    let tool_end = recv_json(&mut ws).await;
-    assert_eq!(tool_end["type"], "ToolCallEnd");
-    let tool_result = recv_json(&mut ws).await;
-    assert_eq!(tool_result["type"], "ToolCallResult");
-    assert_eq!(tool_result["content"], "did the risky thing");
-
-    let permission_request = recv_json(&mut ws).await;
-    assert_eq!(permission_request["type"], "Custom");
-    assert_eq!(permission_request["name"], "arlo.permission_request");
-    let call_id = permission_request["value"]["callId"].as_str().unwrap().to_string();
-    assert_eq!(permission_request["value"]["toolName"], "always_ask");
+    // agent-core's run loop (a separate tokio task spawned by run_stream)
+    // emits TurnStart/ToolStart/ToolEnd into its own internal channel, and
+    // separately calls approval_handler.request_approval() (which sends the
+    // Custom permission_request directly to the shared out_tx) once
+    // resolve_next_step sees the tool needs approval. spawn_run's own task
+    // has to be scheduled separately to drain that internal channel and
+    // forward the converted AguiEvents to the same out_tx, so these two
+    // producers race: StepStarted/ToolCallStart/ToolCallEnd/ToolCallResult
+    // and the permission_request can arrive in any relative order.
+    let mut got_step_started = false;
+    let mut got_tool_start = false;
+    let mut got_tool_end = false;
+    let mut got_tool_result = false;
+    let mut call_id = None;
+    for _ in 0..5 {
+        let event = recv_json(&mut ws).await;
+        match event["type"].as_str().unwrap() {
+            "StepStarted" => got_step_started = true,
+            "ToolCallStart" => {
+                got_tool_start = true;
+                assert_eq!(event["toolCallName"], "always_ask");
+            }
+            "ToolCallEnd" => got_tool_end = true,
+            "ToolCallResult" => {
+                got_tool_result = true;
+                assert_eq!(event["content"], "did the risky thing");
+            }
+            "Custom" if event["name"] == "arlo.permission_request" => {
+                call_id = Some(event["value"]["callId"].as_str().unwrap().to_string());
+                assert_eq!(event["value"]["toolName"], "always_ask");
+            }
+            other => panic!("unexpected event type: {other}"),
+        }
+    }
+    assert!(got_step_started, "expected a StepStarted event");
+    assert!(got_tool_start, "expected a ToolCallStart event");
+    assert!(got_tool_end, "expected a ToolCallEnd event");
+    assert!(got_tool_result, "expected a ToolCallResult event");
+    let call_id = call_id.expect("expected an arlo.permission_request event");
 
     ws.send(WsMessage::Text(
         json!({
@@ -264,4 +281,44 @@ async fn tool_call_requiring_approval_round_trips_through_websocket() {
     assert_eq!(text_end["type"], "TextMessageEnd");
     let finished = recv_json(&mut ws).await;
     assert_eq!(finished["type"], "RunFinished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn second_connection_takes_over_and_first_is_closed() {
+    let addr = start_test_server(Arc::new(EchoModel), vec![], PermissionMode::Bypass).await;
+
+    let mut tab_a = connect(addr).await;
+    recv_json(&mut tab_a).await; // MessagesSnapshot
+    recv_json(&mut tab_a).await; // task_snapshot
+    recv_json(&mut tab_a).await; // todo_snapshot
+
+    tab_a
+        .send(WsMessage::Text(json!({"type": "user_message", "text": "hi"}).to_string().into()))
+        .await
+        .unwrap();
+    // Drain tab A's reply so shared history has one exchange before tab B connects.
+    loop {
+        let event = recv_json(&mut tab_a).await;
+        if event["type"] == "RunFinished" {
+            break;
+        }
+    }
+
+    let mut tab_b = connect(addr).await;
+
+    // Tab A should see a session_closed notice, then the connection closes.
+    let closed = recv_json(&mut tab_a).await;
+    assert_eq!(closed["type"], "Custom");
+    assert_eq!(closed["name"], "arlo.session_closed");
+    let next = tab_a.next().await;
+    assert!(
+        matches!(next, None | Some(Ok(WsMessage::Close(_)))),
+        "expected the connection to close after arlo.session_closed, got {next:?}"
+    );
+
+    // Tab B sees the history tab A built up, not an empty fresh session.
+    let snapshot = recv_json(&mut tab_b).await;
+    assert_eq!(snapshot["type"], "MessagesSnapshot");
+    let messages = snapshot["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "expected the user + assistant messages from tab A: {messages:?}");
 }

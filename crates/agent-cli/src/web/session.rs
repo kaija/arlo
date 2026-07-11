@@ -10,6 +10,7 @@ use agent_core::{
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
@@ -22,14 +23,23 @@ use super::ws_approval::WebApprovalHandler;
 /// up, not the history the process started with.
 pub struct SharedSessionState {
     history: Mutex<Vec<CoreMessage>>,
-    // unused until Task 5 wires up takeover
-    #[allow(dead_code)]
     active: Mutex<Option<oneshot::Sender<()>>>,
+    /// Set to `true` while a run is in flight; a takeover leaves it `true`
+    /// so the *next* connection can tell it interrupted something, without
+    /// needing to synchronize with exactly when the ousted connection's
+    /// loop gets scheduled. Cleared (read-and-take) by whichever connection
+    /// checks it next, and cleared normally when a run finishes or the
+    /// owning connection disconnects without being kicked.
+    run_active: Mutex<bool>,
 }
 
 impl SharedSessionState {
     pub fn new(initial_history: Vec<CoreMessage>) -> Self {
-        Self { history: Mutex::new(initial_history), active: Mutex::new(None) }
+        Self {
+            history: Mutex::new(initial_history),
+            active: Mutex::new(None),
+            run_active: Mutex::new(false),
+        }
     }
 }
 
@@ -136,6 +146,24 @@ fn spawn_run(
 pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc<SharedSessionState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
+    let (kick_tx, mut kicked) = oneshot::channel::<()>();
+    if let Some(prev) = shared.active.lock().await.replace(kick_tx) {
+        let _ = prev.send(());
+    }
+
+    let was_interrupted = {
+        let mut flag = shared.run_active.lock().await;
+        let v = *flag;
+        *flag = false;
+        v
+    };
+    if was_interrupted {
+        send_event(&mut ws_tx, AguiEvent::RunError {
+            message: "session opened in another tab".to_string(),
+            code: Some("aborted".to_string()),
+        }).await;
+    }
+
     let (out_tx, mut out_rx) = mpsc::channel::<AguiEvent>(256);
     let approval_handler = Arc::new(WebApprovalHandler::new(out_tx.clone()));
 
@@ -144,9 +172,22 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
     send_task_and_todo_snapshot(&mut ws_tx, &config.task_store).await;
 
     let mut current_run: Option<JoinHandle<()>> = None;
+    let mut was_kicked = false;
 
     loop {
         tokio::select! {
+            _ = &mut kicked => {
+                was_kicked = true;
+                if let Some(handle) = current_run.take() {
+                    handle.abort();
+                }
+                send_event(&mut ws_tx, AguiEvent::Custom {
+                    name: "arlo.session_closed".to_string(),
+                    value: json!({ "reason": "session opened in another tab" }),
+                }).await;
+                let _ = ws_tx.send(WsMessage::Close(None)).await;
+                break;
+            }
             incoming = ws_rx.next() => {
                 match incoming {
                     Some(Ok(WsMessage::Text(text))) => {
@@ -161,6 +202,7 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
                                     h.push(CoreMessage::User { content: vec![ContentBlock::Text { text }] });
                                     h.clone()
                                 };
+                                *shared.run_active.lock().await = true;
                                 let handle = spawn_run(&config, approval_handler.clone(), shared.clone(), history, out_tx.clone());
                                 current_run = Some(handle);
                             }
@@ -175,6 +217,7 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
                                 if let Some(handle) = current_run.take() {
                                     handle.abort();
                                     approval_handler.deny_all().await;
+                                    *shared.run_active.lock().await = false;
                                 }
                             }
                             Err(e) => {
@@ -191,8 +234,12 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
                 }
             }
             Some(event) = out_rx.recv() => {
+                let is_run_finished = matches!(event, AguiEvent::RunFinished { .. });
                 if !send_event(&mut ws_tx, event).await {
                     break;
+                }
+                if is_run_finished {
+                    *shared.run_active.lock().await = false;
                 }
             }
         }
@@ -202,4 +249,7 @@ pub async fn run_session(socket: WebSocket, config: WebServerConfig, shared: Arc
         handle.abort();
     }
     approval_handler.deny_all().await;
+    if !was_kicked {
+        *shared.run_active.lock().await = false;
+    }
 }
