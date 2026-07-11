@@ -86,7 +86,23 @@ impl ConfigResolver {
     ///
     /// Returns `Err` if --profile references an unknown name or credentials are missing.
     pub fn resolve(inputs: &ConfigInputs) -> Result<Option<ResolvedProfile>, ConfigError> {
-        let user_profiles = Self::load_profiles_from_user();
+        Self::resolve_with_user_path(inputs, SettingsLoader::user_path())
+    }
+
+    /// Same as `resolve`, but with the user-level settings path injected
+    /// explicitly rather than resolved from the real home directory.
+    ///
+    /// Tests use this directly (passing `None`, or a path under a `TempDir`)
+    /// so they stay hermetic — a developer's real `~/.arlo/settings.json`
+    /// must never leak into a test's expectations.
+    fn resolve_with_user_path(
+        inputs: &ConfigInputs,
+        user_path: Option<PathBuf>,
+    ) -> Result<Option<ResolvedProfile>, ConfigError> {
+        let user_profiles = match user_path {
+            Some(p) => Self::load_profiles_from_path(&p),
+            None => ProfilesSection::default(),
+        };
         let project_profiles = Self::load_profiles_from_project(&inputs.working_dir);
         let merged = Self::merge_profiles(user_profiles, project_profiles);
 
@@ -211,21 +227,6 @@ impl ConfigResolver {
             });
         }
         Ok(())
-    }
-
-    /// Load profiles from the user-level settings file (~/.arlo/settings.json).
-    ///
-    /// Returns `ProfilesSection::default()` if:
-    /// - Home directory cannot be determined
-    /// - File does not exist
-    /// - File contains invalid JSON
-    /// - File has no "profiles" key
-    fn load_profiles_from_user() -> ProfilesSection {
-        let path = match SettingsLoader::user_path() {
-            Some(p) => p,
-            None => return ProfilesSection::default(),
-        };
-        Self::load_profiles_from_path(&path)
     }
 
     /// Load profiles from the project-level settings file (.arlo/settings.json).
@@ -638,7 +639,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -1063,7 +1064,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap().unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap().unwrap();
         assert_eq!(result.provider, "ollama");
         assert_eq!(result.model, "llama3");
         assert_eq!(result.base_url, Some("http://localhost:11434".to_string()));
@@ -1094,7 +1095,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap().unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap().unwrap();
         assert_eq!(result.provider, "ollama");
         assert_eq!(result.model, "codellama");
     }
@@ -1118,7 +1119,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let err = ConfigResolver::resolve(&inputs).unwrap_err();
+        let err = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap_err();
         assert_eq!(
             err,
             ConfigError::UnknownProfile {
@@ -1151,7 +1152,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap().unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap().unwrap();
         assert_eq!(result.model, "codellama"); // Overridden
         assert_eq!(result.provider, "ollama"); // Unchanged
     }
@@ -1176,7 +1177,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -1200,7 +1201,7 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
         };
 
-        let result = ConfigResolver::resolve(&inputs).unwrap();
+        let result = ConfigResolver::resolve_with_user_path(&inputs, None).unwrap();
         assert!(result.is_none());
     }
 
