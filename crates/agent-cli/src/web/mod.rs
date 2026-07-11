@@ -5,3 +5,5 @@ pub mod agui;
 pub mod server;
 pub mod session;
 pub mod ws_approval;
+
+pub use server::run_web_server;

@@ -11,6 +11,8 @@
 
 mod tui;
 
+use agent_cli::web;
+
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
@@ -69,6 +71,10 @@ struct CliArgs {
     resume: Option<String>,
     /// When true, list stored sessions and exit.
     list_sessions: bool,
+    /// Start the web UI server instead of the TUI REPL.
+    web: bool,
+    /// Port for the web UI server (only used when `web` is set).
+    port: u16,
 }
 
 /// Parse CLI arguments from a given slice (testable version).
@@ -86,6 +92,8 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
     let mut skip_permissions = false;
     let mut resume: Option<String> = None;
     let mut list_sessions = false;
+    let mut web = false;
+    let mut port: u16 = 8787;
     let mut i = 0;
 
     while i < args.len() {
@@ -120,6 +128,18 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
             "--sessions" => {
                 list_sessions = true;
             }
+            "--web" => {
+                web = true;
+            }
+            "--port" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--port requires a value".to_string());
+                }
+                port = args[i]
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid --port value: {}", args[i]))?;
+            }
             "--help" | "-h" => {
                 print_usage();
                 process::exit(0);
@@ -140,6 +160,10 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
         Some(prompt_parts.join(" "))
     };
 
+    if web && prompt.is_some() {
+        return Err("--web cannot be combined with a prompt".to_string());
+    }
+
     Ok(CliArgs {
         model,
         profile,
@@ -148,6 +172,8 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
         skip_permissions,
         resume,
         list_sessions,
+        web,
+        port,
     })
 }
 
@@ -178,6 +204,8 @@ fn print_usage() {
     eprintln!("  --yolo            Alias for --skip-permissions");
     eprintln!("  --resume <ID>     Resume a stored session (see --sessions)");
     eprintln!("  --sessions        List stored sessions (~/.arlo/sessions) and exit");
+    eprintln!("  --web             Start the web UI server instead of the TUI");
+    eprintln!("  --port <N>        Port for the web UI server (default: 8787, only with --web)");
     eprintln!("  --help, -h        Show this help message");
     eprintln!();
     eprintln!("If PROMPT is provided, run in single-prompt mode (print response and exit).");
@@ -729,13 +757,30 @@ Additional tool guidance:
             }
         }
         None => {
-            // Interactive TUI REPL mode
             let permission_mode = if cli.skip_permissions {
                 PermissionMode::Bypass
             } else {
                 PermissionMode::Normal
             };
-            if let Err(e) = tui::run_tui_repl(
+            if cli.web {
+                if let Err(e) = web::run_web_server(
+                    provider,
+                    &model,
+                    tools,
+                    instructions,
+                    permission_mode,
+                    task_store,
+                    session.store.clone(),
+                    session.id.clone(),
+                    session.initial_history,
+                    cli.port,
+                )
+                .await
+                {
+                    eprintln!("{}", e);
+                    process::exit(1);
+                }
+            } else if let Err(e) = tui::run_tui_repl(
                 provider,
                 &model,
                 tools,
@@ -791,5 +836,41 @@ mod tests {
         let result = parse_args_from(&args);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "--profile requires a value");
+    }
+
+    #[test]
+    fn test_web_flag_parses() {
+        let args = vec!["--web".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert!(result.web);
+        assert_eq!(result.port, 8787);
+    }
+
+    #[test]
+    fn test_port_flag_parses() {
+        let args = vec!["--port".to_string(), "9000".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.port, 9000);
+    }
+
+    #[test]
+    fn test_port_flag_missing_value() {
+        let args = vec!["--port".to_string()];
+        let result = parse_args_from(&args);
+        assert_eq!(result.unwrap_err(), "--port requires a value");
+    }
+
+    #[test]
+    fn test_port_flag_invalid_value() {
+        let args = vec!["--port".to_string(), "not-a-number".to_string()];
+        let result = parse_args_from(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_web_with_prompt_is_error() {
+        let args = vec!["--web".to_string(), "do".to_string(), "something".to_string()];
+        let result = parse_args_from(&args);
+        assert!(result.unwrap_err().contains("cannot be combined"));
     }
 }
