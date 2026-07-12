@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useAgentSession } from "./useAgentSession";
 import { ChatPane } from "./components/ChatPane";
 import { ApprovalQueue } from "./components/ApprovalQueue";
+import { Sidebar } from "./components/Sidebar";
+import { Toasts } from "./components/Toasts";
 
 export default function App() {
   const session = useAgentSession();
@@ -28,6 +30,8 @@ export default function App() {
         />
       </main>
       <ApprovalQueue approvals={session.approvals} onRespond={session.sendApprovalResponse} />
+      <Sidebar tasks={session.tasks} todos={session.todos} />
+      <Toasts toasts={session.toasts} onDismiss={session.dismissToast} />
     </div>
   );
 }
