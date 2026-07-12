@@ -88,3 +88,34 @@ button {
 }
 button:disabled { opacity: 0.5; cursor: default; }
 .button--danger { background: #c62828; }
+
+.app__main { border-right: 1px solid #333; }
+
+.approval-queue {
+  width: 320px;
+  flex-shrink: 0;
+  padding: 1rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.approval-queue h2 { font-size: 0.9rem; margin: 0 0 0.5rem; color: #999; }
+
+.approval-queue__summary {
+  width: 100%;
+  text-align: left;
+  background: #262626;
+  border: 1px solid #444;
+}
+
+.approval-card {
+  border: 1px solid #b58900;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: #2a2410;
+}
+.approval-card__agent { font-size: 0.75rem; color: #b58900; text-transform: uppercase; }
+.approval-card__tool { font-family: monospace; margin: 0.5rem 0; word-break: break-word; }
+.approval-card__actions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+.approval-card__actions button { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
