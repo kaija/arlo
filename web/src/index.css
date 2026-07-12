@@ -185,3 +185,22 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .toast--success { border-color: #2e7d32; }
 .toast--error { border-color: #c62828; }
+
+.app--closed {
+  align-items: center;
+  justify-content: center;
+}
+
+.session-banner {
+  text-align: center;
+  padding: 2rem;
+}
+.session-banner p { font-size: 1.1rem; margin-bottom: 1rem; }
+
+.interrupted-notice {
+  padding: 0.5rem 1rem;
+  background: #2a2410;
+  border-bottom: 1px solid #b58900;
+  color: #e0c46a;
+  font-size: 0.85rem;
+}
