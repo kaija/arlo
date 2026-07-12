@@ -1,4 +1,4 @@
-.PHONY: build run test check fmt lint clean release
+.PHONY: build run test check fmt lint clean release web-build
 
 # Default target
 all: check build test
@@ -10,6 +10,13 @@ build:
 # Build in release mode
 release:
 	cargo build --release
+
+# Build the embedded web UI frontend (output: web/dist/, embedded into the
+# arlo binary via rust-embed at Rust compile time — rebuild arlo after this
+# to pick up changes). Not a dependency of build/check/test: only needed
+# when packaging a release binary with --web support.
+web-build:
+	cd web && npm ci && npm run build
 
 # Run the CLI
 run:
