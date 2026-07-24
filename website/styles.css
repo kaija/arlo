@@ -322,12 +322,31 @@ img {
 }
 
 .code-block {
+  position: relative;
   background: #1a1a2e;
   border-radius: var(--radius-lg);
   padding: 24px 28px;
   overflow-x: auto;
   box-shadow: var(--shadow-lg);
 }
+
+.code-block + .code-block { margin-top: 16px; }
+
+.code-block .copy-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: #e0e0f0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-md, 6px);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.code-block .copy-btn:hover { background: rgba(255, 255, 255, 0.16); }
 
 .code-block pre {
   font-family: var(--font-mono);
