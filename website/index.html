@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XSG16Z343H"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XSG16Z343H');
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arlo — Rust-native Agentic AI Framework</title>
+  <meta name="description" content="Arlo is a free, open-source, provider-agnostic agentic AI framework written in Rust. Streaming run loop, MCP, sub-agents, human-in-the-loop permissions — as a TUI, CLI, or embeddable library." />
+  <meta name="theme-color" content="#5856D6" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Arlo — Rust-native Agentic AI Framework" />
+  <meta property="og:description" content="A free, open-source, provider-agnostic agentic AI framework in Rust. Streaming run loop, MCP, sub-agents, human-in-the-loop permissions." />
+  <meta property="og:type" content="website" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav" aria-label="Main navigation">
+    <div class="nav-inner container">
+      <a href="/" class="nav-brand" aria-label="Arlo home">
+        <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="7" fill="#5856D6"/>
+          <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Arlo</span>
+      </a>
+      <div class="nav-links">
+        <a href="#quickstart">Quick Start</a>
+        <a href="#features">Features</a>
+        <a href="#built">How It's Built</a>
+        <a href="#providers">Providers</a>
+        <a href="https://github.com/kaija/arlo" class="btn btn-sm" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-content">
+        <div class="hero-badge">Free &amp; Open Source · MIT</div>
+        <h1>Your agent,<br/>your keys,<br/>your terminal.</h1>
+        <p class="hero-subtitle">
+          Arlo is an open-source, Rust-native agentic AI framework — a leaner, more general-purpose take on what tools like Claude Code offer. A streaming run loop with tool use, human-in-the-loop permissions, sub-agents, MCP integration, and Agent Skills, exposed as a TUI, a one-shot CLI, or an embeddable library.
+        </p>
+        <div class="hero-actions">
+          <a href="#quickstart" class="btn btn-primary">Quick Start</a>
+          <a href="https://github.com/kaija/arlo" class="btn btn-secondary" target="_blank" rel="noopener">
+            <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            View on GitHub
+          </a>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="terminal-frame" role="img" aria-label="Terminal session showing arlo running an agentic task with a permission request">
+          <div class="terminal-titlebar">
+            <span class="terminal-dot terminal-dot-red"></span>
+            <span class="terminal-dot terminal-dot-yellow"></span>
+            <span class="terminal-dot terminal-dot-green"></span>
+            <span class="terminal-title">arlo</span>
+          </div>
+          <div class="terminal-body">
+            <span class="term-line"><span class="term-prompt">$</span> <span class="term-cmd">arlo "summarize this repo"</span></span>
+            <span class="term-line">&nbsp;</span>
+            <span class="term-line"><span class="term-event">[TurnStart]</span> agent=main</span>
+            <span class="term-line"><span class="term-tool">[ToolStart]</span> read_file <span class="term-dim">README.md</span></span>
+            <span class="term-line"><span class="term-tool">[ToolEnd]</span> read_file <span class="term-ok">✓</span></span>
+            <span class="term-line">&nbsp;</span>
+            <span class="term-line">Arlo is a Rust-native agentic AI</span>
+            <span class="term-line">framework with a streaming run loop,</span>
+            <span class="term-line">MCP, sub-agents, and HITL permissions.</span>
+            <span class="term-line">&nbsp;</span>
+            <span class="term-line"><span class="term-event">[Interruption]</span> permission_request</span>
+            <span class="term-line term-dim">  shell(cargo test --workspace)</span>
+            <span class="term-line term-dim">  allow_once · allow_always · reject<span class="term-cursor"></span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick start -->
+  <section id="quickstart" class="quickstart">
+    <div class="container">
+      <div class="quickstart-inner">
+        <div class="section-header">
+          <h2>Up and running in a minute</h2>
+          <p>Requires stable Rust, installed via <a href="https://rustup.rs" target="_blank" rel="noopener" style="color: var(--color-accent); text-decoration: underline;">rustup</a>.</p>
+        </div>
+        <div class="code-block">
+          <pre><span class="cmt"># clone and build</span>
+git clone &lt;repo-url&gt;
+cd arlo-rust
+cargo build --release
+
+<span class="cmt"># set credentials for your provider</span>
+export OPENAI_API_KEY="sk-..."
+
+cargo run -p agent-cli                          <span class="cmt"># interactive TUI</span>
+cargo run -p agent-cli -- "summarize this repo"  <span class="cmt"># one-shot prompt</span>
+
+arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span> <span class="flag">[--profile</span> NAME<span class="flag">]</span> "prompt"</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="features">
+    <div class="container">
+      <div class="section-header">
+        <h2>A small core, fully capable</h2>
+        <p>Everything an agent needs to plan, act, and stay in the loop with you.</p>
+      </div>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+          </div>
+          <h3>Agentic Run Loop</h3>
+          <p>Turn-based loop — compact → request → stream → execute tools → resolve next step — with typed state transitions and automatic error recovery.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+          </div>
+          <h3>MCP Client</h3>
+          <p>Connect external tool servers via the Model Context Protocol alongside built-in file, shell, and web tools.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </div>
+          <h3>Agent Skills</h3>
+          <p>Discover and load Markdown-defined skills from <code>.arlo/skills/</code> (project) and <code>~/.arlo/skills/</code> (user), with template variable substitution.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          </div>
+          <h3>Human-in-the-Loop Permissions</h3>
+          <p>A 4-layer permission engine — glob patterns, static allow/deny lists, and interactive approval prompts — keeps you in control of every tool call.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+          </div>
+          <h3>Task Management &amp; Sub-agents</h3>
+          <p>A built-in task/todo store; spawn foreground or background sub-agents with isolated histories — results deliver back exactly once.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a9 9 0 10-3.6 7.2L21 21"/></svg>
+          </div>
+          <h3>Context Compaction</h3>
+          <p>A 3-layer pipeline — tool-result compaction, session memory, full summarization — keeps long runs inside the context window.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it's built -->
+  <section id="built" class="built">
+    <div class="container">
+      <div class="section-header">
+        <h2>One core, three interfaces</h2>
+        <p>The same Rust core, wherever you need to run it.</p>
+      </div>
+      <div class="built-grid">
+        <div class="interface-card">
+          <div class="interface-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          </div>
+          <h3>Interactive TUI</h3>
+          <p>A ratatui REPL for chatting with the agent, watching tool calls stream, and approving permissions live.</p>
+        </div>
+        <div class="interface-card">
+          <div class="interface-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          </div>
+          <h3>One-shot CLI</h3>
+          <p>Run <code>arlo "prompt"</code> straight from a script or CI job — no prompt starts the interactive REPL instead.</p>
+        </div>
+        <div class="interface-card">
+          <div class="interface-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4.9V17l-9 4.9-9-4.9V6.9L12 2z"/><path d="M12 22V12M21 6.9L12 12 3 6.9"/></svg>
+          </div>
+          <h3>Embeddable Library</h3>
+          <p>Pull the crates directly into your own Rust application and wire the run loop into whatever surface you need.</p>
+        </div>
+      </div>
+      <div class="crates-content">
+        <h3>Five small crates, each swappable</h3>
+        <div class="tech-pills">
+          <span class="pill">agent-core</span>
+          <span class="pill">agent-llm</span>
+          <span class="pill">agent-tools</span>
+          <span class="pill">agent-mcp</span>
+          <span class="pill">agent-cli</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Providers -->
+  <section id="providers" class="providers">
+    <div class="container">
+      <div class="section-header">
+        <h2>Provider-agnostic by design</h2>
+        <p>Point Arlo at the model you want — hosted or your own.</p>
+      </div>
+      <div class="providers-grid">
+        <div class="provider-card">
+          <div class="provider-logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M16 4L6 10v12l10 6 10-6V10L16 4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 16v12M16 16L6 10M16 16l10-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <h3>Anthropic</h3>
+          <p>Messages API, Claude Opus, Sonnet, and Haiku models, with retry and model overrides built in.</p>
+        </div>
+        <div class="provider-card">
+          <div class="provider-logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/><path d="M16 8v8l5.66 5.66" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <h3>OpenAI-Compatible</h3>
+          <p>Any OpenAI-compatible HTTP API — set <code>OPENAI_API_KEY</code> and go.</p>
+        </div>
+        <div class="provider-card">
+          <div class="provider-logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><rect x="6" y="6" width="20" height="20" rx="4" stroke="currentColor" stroke-width="2"/><path d="M11 16h10M16 11v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <h3>Local Model Server</h3>
+          <p>Point <code>OPENAI_BASE_URL</code> at your own self-hosted or local inference server.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg class="nav-logo" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect width="28" height="28" rx="7" fill="#5856D6"/>
+            <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <span>Arlo</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/kaija/arlo" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/kaija/arlo/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
