@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Page Not Found — Arlo</title>
+  <meta name="theme-color" content="#5856D6" />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .notfound {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+    }
+    .notfound h1 {
+      font-size: 4rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--color-accent);
+      margin-bottom: 12px;
+    }
+    .notfound p {
+      font-size: 1.125rem;
+      color: var(--color-text-secondary);
+      margin-bottom: 28px;
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav" aria-label="Main navigation">
+    <div class="nav-inner container">
+      <a href="/" class="nav-brand" aria-label="Arlo home">
+        <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="7" fill="#5856D6"/>
+          <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Arlo</span>
+      </a>
+    </div>
+  </nav>
+  <div class="notfound">
+    <h1>404</h1>
+    <p>This page doesn't exist.</p>
+    <a href="/" class="btn btn-primary">Back to home</a>
+  </div>
+</body>
+</html>
