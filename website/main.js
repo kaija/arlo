@@ -35,6 +35,39 @@
     }
   });
 
+  // Copy-to-clipboard for code blocks
+  function fallbackCopy(text) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  }
+
+  document.querySelectorAll('.code-block .copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const pre = btn.parentElement.querySelector('pre');
+      const text = pre.textContent;
+      const showCopied = function () {
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = original; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied, function () {
+          fallbackCopy(text);
+          showCopied();
+        });
+      } else {
+        fallbackCopy(text);
+        showCopied();
+      }
+    });
+  });
+
   // Add subtle nav background on scroll
   const nav = document.querySelector('.nav');
   if (nav) {
