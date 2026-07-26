@@ -9,36 +9,30 @@
 //! - `ANTHROPIC_API_KEY` for Anthropic models
 //! - `OLLAMA_HOST` for local Ollama models
 
+mod assembly;
 mod serve;
 mod tui;
 
-use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use agent_core::{
-    run, Agent, ConfigError, ConfigInputs, ConfigResolver, DenyAllApprovalHandler, FsSessionStore,
-    InMemoryTaskStore, Input, Instructions, Message, Model, ModelError, ModelProvider,
-    PermissionEngine, PermissionMode, RunConfig, SessionStore, SkillRegistry, SkillTool,
-    SubAgentDef, SubAgentTool, TaskStore, TodoListTool, Tool,
+    run, FsSessionStore, InMemoryTaskStore, Input, Instructions, Message, Model, ModelError,
+    ModelProvider, PermissionMode, SessionStore, Tool,
 };
 use agent_llm::{ModelOverrideWrapper, UnifiedProvider};
-use agent_tools::{
-    BraveSearchProvider, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ShellTool,
-    WebFetchTool, WebSearchTool,
-};
 
 /// A wrapping `ModelProvider` that applies `ModelOverrideWrapper` after resolving a model.
 ///
 /// When a profile specifies `context_window` or `max_output_tokens`, the resolved model
 /// is wrapped to override those values. If no overrides are present, the inner model
 /// is returned directly (zero-cost passthrough).
-struct OverridingProvider {
-    inner: Arc<UnifiedProvider>,
-    context_window: Option<usize>,
-    max_output_tokens: Option<usize>,
+pub(crate) struct OverridingProvider {
+    pub inner: Arc<UnifiedProvider>,
+    pub context_window: Option<usize>,
+    pub max_output_tokens: Option<usize>,
 }
 
 #[async_trait]
@@ -205,98 +199,6 @@ fn print_usage() {
     eprintln!("  BRAVE_API_KEY       API key for Brave Search (enables web_search tool)");
 }
 
-/// Create the default set of built-in tools.
-fn default_tools() -> Vec<Arc<dyn Tool>> {
-    let mut tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(ShellTool::new()),
-        Arc::new(FileReadTool::new()),
-        Arc::new(FileWriteTool::new()),
-        Arc::new(FileEditTool::new()),
-        Arc::new(GlobTool::new()),
-        Arc::new(GrepTool::new()),
-        Arc::new(WebFetchTool::new()),
-    ];
-
-    // Register WebSearchTool only if Brave API key is available
-    if let Ok(api_key) = std::env::var("BRAVE_API_KEY") {
-        if !api_key.is_empty() {
-            tools.push(Arc::new(WebSearchTool::new(Box::new(
-                BraveSearchProvider::new(api_key),
-            ))));
-        }
-    }
-
-    tools
-}
-
-/// Discover the project-level skills directory.
-///
-/// Looks for `.arlo/skills/` in the current working directory.
-fn project_skills_dir() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let dir = cwd.join(".arlo").join("skills");
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
-}
-
-/// Discover the user-level skills directory.
-///
-/// Looks for `~/.arlo/skills/`.
-fn user_skills_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".arlo").join("skills");
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
-}
-
-/// Load skills from project-level and user-level directories, returning
-/// the registry and the skill tools ready for registration.
-fn load_skills() -> (SkillRegistry, Vec<Arc<dyn Tool>>) {
-    let project_dir = project_skills_dir();
-    let user_dir = user_skills_dir();
-
-    let registry = SkillRegistry::load(project_dir.as_deref(), user_dir.as_deref());
-
-    let skill_tools: Vec<Arc<dyn Tool>> = registry
-        .skills()
-        .iter()
-        .cloned()
-        .map(|skill| Arc::new(SkillTool::new(skill)) as Arc<dyn Tool>)
-        .collect();
-
-    (registry, skill_tools)
-}
-
-/// Determine the model name to use.
-///
-/// Priority: --model flag > default from provider (first available).
-fn resolve_model_name(model_override: Option<String>, provider: &UnifiedProvider) -> String {
-    if let Some(model) = model_override {
-        return model;
-    }
-
-    // Use a sensible default based on available providers
-    let models = provider.available_models();
-    if !models.is_empty() {
-        return models[0].clone();
-    }
-
-    // Fallback defaults based on environment
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        "anthropic:claude-sonnet-4-20250514".to_string()
-    } else if std::env::var("OPENAI_API_KEY").is_ok() {
-        "openai:gpt-4o".to_string()
-    } else {
-        "ollama:llama3".to_string()
-    }
-}
-
 /// Dump the full system prompt (instructions + tool definitions) for debugging.
 ///
 /// This helps troubleshoot where tokens are being spent by showing exactly what
@@ -381,42 +283,11 @@ fn dump_prompt(instructions: &Instructions, tools: &[Arc<dyn Tool>]) {
 }
 
 /// Run a single prompt through the agent and return the output.
-///
-/// In single-prompt (non-interactive) mode, a `DenyAllApprovalHandler` is wired
-/// so that any tool requiring approval is automatically denied rather than
-/// hanging on user input that will never come. The default `PermissionMode::Bypass`
-/// means most tools skip permission checks entirely, but if the mode is changed
-/// to `Normal` (e.g., via settings file loading), the handler ensures safe behavior.
-///
-/// If a `TaskStore` is provided, `SubAgentTool` instances will be constructed with
-/// task tracking enabled via `with_task_store()`.
 async fn run_single_prompt(
-    provider: Arc<dyn ModelProvider>,
-    model: &str,
+    assembled: &assembly::AssemblyOutput,
     prompt: &str,
-    tools: Vec<Arc<dyn Tool>>,
-    instructions: Instructions,
-    _task_store: Option<Arc<dyn TaskStore>>,
     session: &SessionContext,
 ) -> Result<String, String> {
-    let mut builder = Agent::builder("arlo").instructions(instructions);
-    for tool in tools {
-        builder = builder.tool(tool);
-    }
-    let agent = builder.build();
-
-    let permissions = PermissionEngine::new(PermissionMode::Bypass);
-
-    let mut config_builder = RunConfig::builder(provider.clone(), model)
-        .permissions(permissions)
-        .approval_handler(Arc::new(DenyAllApprovalHandler));
-
-    if let Some(store) = _task_store {
-        config_builder = config_builder.task_store(store);
-    }
-
-    let config = config_builder.build();
-
     let mut messages = session.initial_history.clone();
     messages.push(Message::User {
         content: vec![agent_core::ContentBlock::Text {
@@ -425,7 +296,7 @@ async fn run_single_prompt(
     });
     let input = Input::Items { messages };
 
-    match run(&agent, input, &config).await {
+    match run(&assembled.agent, input, &assembled.config).await {
         Ok(result) => {
             if let Err(e) = session
                 .store
@@ -510,212 +381,77 @@ async fn main() {
         },
     };
 
-    // Resolve provider configuration via ConfigResolver (profile-based or env fallback)
+    // Assemble the agent for the requested surface.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let config_inputs = ConfigInputs {
+    let env = assembly::AssemblyEnv::from_process_env();
+
+    // Determine the surface.  For --dump-prompt and --serve we need to know the
+    // surface before assembly, but assembly may fail so we handle dump-prompt
+    // after a successful assemble call.
+    let surface = if cli.serve.is_some() {
+        assembly::Surface::Serve
+    } else if cli.prompt.is_some() {
+        assembly::Surface::SinglePrompt
+    } else {
+        assembly::Surface::Tui {
+            skip_permissions: cli.skip_permissions,
+        }
+    };
+
+    let assembled = match assembly::assemble(assembly::AssemblyInputs {
+        env: env.clone(),
         profile_name: cli.profile.clone(),
         model_override: cli.model.clone(),
         working_dir: cwd.clone(),
-    };
-
-    let (provider, model): (Arc<dyn ModelProvider>, String) = match ConfigResolver::resolve(
-        &config_inputs,
-    ) {
-        Ok(Some(resolved)) => {
-            // Profile resolved successfully — construct provider from profile
-            let p = match UnifiedProvider::from_profile(&resolved) {
-                Ok(p) => Arc::new(p),
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    process::exit(1);
-                }
-            };
-            let m = resolved.model.clone();
-            // Wrap with OverridingProvider if context_window or max_output_tokens are set
-            let provider: Arc<dyn ModelProvider> =
-                if resolved.context_window.is_some() || resolved.max_output_tokens.is_some() {
-                    Arc::new(OverridingProvider {
-                        inner: p,
-                        context_window: resolved.context_window,
-                        max_output_tokens: resolved.max_output_tokens,
-                    })
-                } else {
-                    p
-                };
-            (provider, m)
-        }
-        Ok(None) => {
-            // No profiles configured — fall back to existing env-based behavior
-            match UnifiedProvider::from_env() {
-                Ok(p) => {
-                    let p = Arc::new(p);
-                    let m = resolve_model_name(cli.model, &p);
-                    (p as Arc<dyn ModelProvider>, m)
-                }
-                Err(e) => {
-                    if cli.dump_prompt {
-                        // For dump-prompt, provider isn't strictly necessary but we
-                        // still want to show the model resolution if possible.
-                        eprintln!("warning: {}", e);
-                        eprintln!();
-
-                        // Load skills and tools anyway for the dump
-                        let (skill_registry, skill_tools) = load_skills();
-                        let mut tools = default_tools();
-                        tools.extend(skill_tools);
-
-                        let skill_prompt = skill_registry.system_prompt_section();
-                        let instructions = if skill_prompt.is_empty() {
-                            Instructions::Static(
-                                "(core prompt omitted in no-provider mode)".to_string(),
-                            )
-                        } else {
-                            Instructions::Static(skill_prompt)
-                        };
-
-                        dump_prompt(&instructions, &tools);
-                        process::exit(0);
+        surface,
+    }) {
+        Ok(a) => a,
+        Err(assembly::AssemblyError::NoProvider(_)) if cli.dump_prompt => {
+            // dump-prompt with no provider: show tool schemas only
+            eprintln!("warning: no provider configured — showing tool schemas only");
+            eprintln!();
+            // Build minimal tool list without skills (no working_dir resolution needed)
+            let tools: Vec<Arc<dyn Tool>> = {
+                use agent_tools::*;
+                let mut t: Vec<Arc<dyn Tool>> = vec![
+                    Arc::new(ShellTool::new()),
+                    Arc::new(FileReadTool::new()),
+                    Arc::new(FileWriteTool::new()),
+                    Arc::new(FileEditTool::new()),
+                    Arc::new(GlobTool::new()),
+                    Arc::new(GrepTool::new()),
+                    Arc::new(WebFetchTool::new()),
+                ];
+                if let Some(k) = env.get("BRAVE_API_KEY") {
+                    if !k.is_empty() {
+                        t.push(Arc::new(WebSearchTool::new(Box::new(
+                            BraveSearchProvider::new(k.to_string()),
+                        ))));
                     }
-                    eprintln!("error: {}", e);
-                    eprintln!();
-                    eprintln!(
-                        "Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST"
-                    );
-                    process::exit(1);
                 }
+                t
+            };
+            use agent_core::Instructions;
+            let instructions =
+                Instructions::Static("(core prompt omitted — no provider configured)".to_string());
+            dump_prompt(&instructions, &tools);
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            if matches!(e, assembly::AssemblyError::NoProvider(_)) {
+                eprintln!();
+                eprintln!("Set at least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST");
             }
-        }
-        Err(ConfigError::UnknownProfile { name }) => {
-            eprintln!("error: unknown profile '{}'", name);
             process::exit(1);
         }
-        Err(ConfigError::MissingCredentials { provider, profile }) => {
-            eprintln!(
-                    "error: profile '{}' requires API key for '{}' (set env var or add api_key to profile)",
-                    profile, provider
-                );
-            process::exit(1);
-        }
-    };
-
-    // Load skills from .arlo/skills/ directories
-    let (skill_registry, skill_tools) = load_skills();
-
-    // Build the combined tools list (built-in + skills)
-    let mut tools = default_tools();
-    tools.extend(skill_tools);
-
-    // Create the shared TaskStore for background task tracking and todo planning
-    let task_store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
-
-    // Register TodoListTool with the shared store
-    tools.push(Arc::new(TodoListTool::new(task_store.clone())));
-
-    // Register SubAgentTool for background task delegation
-    {
-        let sub_agent = Agent::builder("sub-agent")
-            .instructions(Instructions::Static(
-                "You are a background helper agent. Complete the delegated task using available tools. \
-                 Return a concise summary of your findings or actions when done.".to_string()
-            ))
-            .tool(Arc::new(ShellTool::new()))
-            .tool(Arc::new(FileReadTool::new()))
-            .tool(Arc::new(FileWriteTool::new()))
-            .tool(Arc::new(FileEditTool::new()))
-            .tool(Arc::new(GlobTool::new()))
-            .tool(Arc::new(GrepTool::new()))
-            .build();
-
-        let sub_agent_def = SubAgentDef {
-            agent: Arc::new(sub_agent),
-            tool_name: Some("sub_agent".to_string()),
-            tool_description: Some(
-                "Spawn a background sub-agent to handle a delegated task. The sub-agent runs \
-                 independently with access to shell, file, and search tools. Its progress is \
-                 tracked and you'll be notified when it completes."
-                    .to_string(),
-            ),
-            input_schema: None,
-            max_turns: Some(15),
-            background: true,
-            allowed_tools: None,
-        };
-
-        let sub_agent_config = RunConfig::builder(provider.clone(), &model)
-            .permissions(PermissionEngine::new(PermissionMode::Bypass))
-            .approval_handler(Arc::new(DenyAllApprovalHandler))
-            .max_turns(15)
-            .build();
-
-        tools.push(Arc::new(SubAgentTool::with_task_store(
-            sub_agent_def,
-            sub_agent_config,
-            task_store.clone(),
-        )));
-    }
-
-    // Core agent system prompt — defines autonomous behavior
-    let core_prompt = "\
-You are arlo, an autonomous coding agent running in the user's terminal. You have access to tools for file operations, shell commands, web search, and planning.
-
-## Task Approach
-
-- When given a task, break it into steps and execute each step using available tools. Do not stop after planning — work through the plan.
-- Use the todolist tool to track multi-step work: add items, mark them in_progress as you work, and mark completed when done.
-- After creating a plan, immediately begin executing the first item. Continue until all items are complete or you need user input.
-- Mark each sub-task as completed immediately upon finishing — do not batch completions.
-- When given an unclear instruction, interpret it in the context of the current environment and prior conversation.
-- Do not propose changes on material you haven't reviewed. Examine existing state before suggesting modifications.
-- If an approach fails, diagnose why before switching tactics — review the error, check assumptions, try a focused fix. Don't retry identically, but don't abandon a viable approach after a single failure either.
-
-## Tool Usage
-
-Using dedicated tools allows the user to better understand and review your work. This is CRITICAL:
-- To read files, use file_read instead of cat, head, tail, or sed
-- To create a new file or fully rewrite one, use file_write instead of cat with heredoc, echo, or sed/awk
-- To change part of an existing file, use file_edit (exact string replacement) instead of rewriting the whole file with file_write. For long documents, build them up with multiple file_edit calls (e.g. write a skeleton, then edit in each section) rather than emitting the entire file in one call
-- To search for files by name/pattern, use glob instead of find or ls
-- To search file contents, use grep instead of shell grep or rg
-- Reserve shell exclusively for system commands and terminal operations that require shell execution (installing packages, running builds/tests, git operations, process management)
-
-Additional tool guidance:
-- When multiple tool calls are independent, make them in parallel for efficiency.
-- If a tool call fails, diagnose why before retrying. Don't retry the identical action blindly.
-
-## Scope & Communication
-
-- Do exactly what was asked. Don't add extras, reorganize surrounding material, or make improvements beyond the request.
-- Don't create unnecessary structure or abstractions for one-time operations.
-- Prefer modifying what already exists over creating new artifacts.
-- Go straight to the point. Lead with the action, not the reasoning. Skip filler.
-- If you need clarification or are blocked, ask the user directly.
-- For destructive or irreversible actions (deleting files, modifying shared configs, publishing), confirm with the user first.
-
-## Sub-Agent Delegation
-
-- Use the sub_agent tool to delegate independent research or background tasks that don't need your immediate attention.
-- The sub-agent runs in the background — you'll be notified when it completes.
-- Continue working on other items while background tasks run.
-
-## Safety
-
-- Freely take local, reversible actions (editing files, running queries, reading data).
-- For actions that are hard to reverse, affect shared systems, or could be destructive, check with the user before proceeding.
-";
-
-    // Build instructions: core prompt + available skills (if any)
-    let skill_prompt = skill_registry.system_prompt_section();
-    let instructions = if skill_prompt.is_empty() {
-        Instructions::Static(core_prompt.to_string())
-    } else {
-        Instructions::Static(format!("{}\n{}", core_prompt, skill_prompt))
     };
 
     // Handle --dump-prompt: print everything and exit
     if cli.dump_prompt {
-        println!("Model: {}", model);
+        println!("Model: {}", assembled.model);
         println!();
-        dump_prompt(&instructions, &tools);
+        dump_prompt(&assembled.instructions, &assembled.tools);
         process::exit(0);
     }
 
@@ -728,17 +464,7 @@ Additional tool guidance:
                 process::exit(1);
             }
         };
-        // Build agent and config for serve mode
-        let mut builder = Agent::builder("arlo").instructions(instructions);
-        for tool in &tools {
-            builder = builder.tool(tool.clone());
-        }
-        let agent = builder.build();
-        let config = RunConfig::builder(provider.clone(), &model)
-            .permissions(PermissionEngine::new(PermissionMode::Bypass))
-            .approval_handler(Arc::new(DenyAllApprovalHandler))
-            .build();
-        if let Err(e) = serve::start_server(bind_addr, agent, config).await {
+        if let Err(e) = serve::start_server(bind_addr, assembled.agent, assembled.config).await {
             eprintln!("error: {}", e);
             process::exit(1);
         }
@@ -749,17 +475,7 @@ Additional tool guidance:
     match cli.prompt {
         Some(prompt_text) => {
             // Single-prompt mode: run, print, exit
-            match run_single_prompt(
-                provider,
-                &model,
-                &prompt_text,
-                tools,
-                instructions,
-                Some(task_store),
-                &session,
-            )
-            .await
-            {
+            match run_single_prompt(&assembled, &prompt_text, &session).await {
                 Ok(output) => {
                     println!("{}", output);
                 }
@@ -777,12 +493,14 @@ Additional tool guidance:
                 PermissionMode::Normal
             };
             if let Err(e) = tui::run_tui_repl(
-                provider,
-                &model,
-                tools,
-                instructions,
+                assembled.provider,
+                &assembled.model,
+                assembled.tools,
+                assembled.instructions,
                 permission_mode,
-                task_store,
+                assembled
+                    .task_store
+                    .unwrap_or_else(|| Arc::new(InMemoryTaskStore::new())),
                 session.store.clone(),
                 session.id.clone(),
                 session.initial_history,
@@ -872,7 +590,11 @@ mod tests {
     #[test]
     fn test_serve_flag_at_end() {
         // --serve at the end with no following arg
-        let args = vec!["--model".to_string(), "x".to_string(), "--serve".to_string()];
+        let args = vec![
+            "--model".to_string(),
+            "x".to_string(),
+            "--serve".to_string(),
+        ];
         let result = parse_args_from(&args).unwrap();
         assert_eq!(result.serve, Some(None));
         assert_eq!(result.model, Some("x".to_string()));

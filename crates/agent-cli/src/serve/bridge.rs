@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ag_ui_protocol::{
     BaseEvent, Event, Interrupt, RunAgentInput, RunErrorEvent, RunFinishedEvent,
     RunFinishedOutcome, StepStartedEvent, TextMessageContentEvent, TextMessageEndEvent,
-    TextMessageStartEvent, TextMessageRole, ToolCallArgsEvent, ToolCallEndEvent,
+    TextMessageRole, TextMessageStartEvent, ToolCallArgsEvent, ToolCallEndEvent,
     ToolCallStartEvent,
 };
 use ag_ui_server::{AgentError, EventEmitter, RunOutcome};
@@ -20,7 +20,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::approval::{AgUiApprovalHandler, map_resume_to_responses};
+use super::approval::{map_resume_to_responses, AgUiApprovalHandler};
 use super::session::{RunSession, SessionState, SessionStore};
 
 // ---------------------------------------------------------------------------
@@ -78,11 +78,9 @@ impl ArloBridge {
                         usage: None,
                     })
                 }
-                ag_ui_protocol::Message::System(s) => {
-                    Some(ArloMessage::System {
-                        content: s.content.clone(),
-                    })
-                }
+                ag_ui_protocol::Message::System(s) => Some(ArloMessage::System {
+                    content: s.content.clone(),
+                }),
                 ag_ui_protocol::Message::Developer(d) => {
                     // Treat developer messages as system messages
                     Some(ArloMessage::System {
@@ -156,20 +154,17 @@ impl ag_ui_server::Agent for ArloBridge {
             // Channel for the approval handler to signal interrupts
             let (interrupt_tx, mut interrupt_rx) = mpsc::channel::<Vec<PendingApproval>>(1);
 
-            // Build a config with our custom approval handler
-            let approval_handler = Arc::new(AgUiApprovalHandler {
-                sessions: Arc::clone(&sessions),
-                thread_id: thread_id.clone(),
-                interrupt_tx,
-            });
-
-            let config = RunConfig::builder(
-                Arc::clone(&base_config.provider),
-                &base_config.model,
-            )
-            .max_turns(base_config.max_turns)
-            .approval_handler(approval_handler)
-            .build();
+            // Build a config with our custom approval handler by cloning base_config.
+            // This preserves the PermissionEngine (and task store) the CLI assembled,
+            // rather than constructing a fresh config that would drop those fields.
+            let approval_handler: Arc<dyn agent_core::config::ApprovalHandler> =
+                Arc::new(AgUiApprovalHandler {
+                    sessions: Arc::clone(&sessions),
+                    thread_id: thread_id.clone(),
+                    interrupt_tx,
+                });
+            let mut config = base_config.clone();
+            config.approval_handler = Some(approval_handler);
 
             // Start the run stream
             let mut stream = run_stream(&agent, arlo_input, &config);
@@ -387,9 +382,7 @@ impl EventMapper {
                 out
             }
             // Compaction and StepResolved are internal — no AG-UI equivalent.
-            RunEvent::Compaction { .. } | RunEvent::StepResolved(_) => {
-                Vec::new()
-            }
+            RunEvent::Compaction { .. } | RunEvent::StepResolved(_) => Vec::new(),
         }
     }
 
@@ -698,10 +691,7 @@ mod tests {
                     is_error,
                 }
             ),
-            (1..100u32, "[a-z]{1,8}").prop_map(|(turn, agent)| RunEvent::TurnStart {
-                turn,
-                agent,
-            }),
+            (1..100u32, "[a-z]{1,8}").prop_map(|(turn, agent)| RunEvent::TurnStart { turn, agent }),
         ]
     }
 

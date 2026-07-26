@@ -337,10 +337,9 @@ mod tests {
                 } else {
                     let (payload, expected) = match action {
                         ResumeAction::None => (None, ApprovalResponse::Allow),
-                        ResumeAction::ArbitraryPayload(val) => (
-                            Some(json!({ "note": val })),
-                            ApprovalResponse::Allow,
-                        ),
+                        ResumeAction::ArbitraryPayload(val) => {
+                            (Some(json!({ "note": val })), ApprovalResponse::Allow)
+                        }
                         ResumeAction::AlwaysAllow(pat) => (
                             Some(json!({"action": "always_allow", "pattern": pat})),
                             ApprovalResponse::AlwaysAllow { pattern: pat },
