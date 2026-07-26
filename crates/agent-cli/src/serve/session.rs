@@ -48,7 +48,11 @@ impl SessionStore {
 
     /// Returns cloned state info for a session (can't return &RunSession through Mutex).
     pub fn get_state(&self, thread_id: &str) -> Option<SessionState> {
-        self.sessions.lock().unwrap().get(thread_id).map(|s| s.state.clone())
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(thread_id)
+            .map(|s| s.state.clone())
     }
 
     /// Remove and return a session.

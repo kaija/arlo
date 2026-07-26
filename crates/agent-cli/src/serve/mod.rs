@@ -46,13 +46,15 @@ pub async fn start_server(
     let bridge = bridge::ArloBridge::new(agent, config, Arc::clone(&sessions));
     let router = ag_ui_server::axum::agent_router(bridge);
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            format!("port {} is already in use", bind_addr.port())
-        } else {
-            format!("failed to bind {bind_addr}: {e}")
-        }
-    })?;
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!("port {} is already in use", bind_addr.port())
+            } else {
+                format!("failed to bind {bind_addr}: {e}")
+            }
+        })?;
 
     let local_addr = listener.local_addr()?;
     tracing::info!("AG-UI server listening on {local_addr}");
@@ -78,9 +80,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
