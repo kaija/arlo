@@ -21,3 +21,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+agent-tools = { path = "../agent-tools" }
