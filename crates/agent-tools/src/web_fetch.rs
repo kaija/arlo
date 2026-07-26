@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use agent_core::error::ToolError;
-use agent_core::tool::{Concurrency, Tool, ToolContext, ToolOutput};
+use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 use crate::html_to_markdown::HtmlToMarkdown;
 
@@ -341,6 +341,10 @@ impl Tool for WebFetchTool {
 
     fn concurrency(&self, _input: &Value) -> Concurrency {
         Concurrency::Safe
+    }
+
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Always
     }
 
     fn timeout(&self) -> Duration {
