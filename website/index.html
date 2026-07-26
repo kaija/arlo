@@ -112,12 +112,15 @@
           <p>Requires stable Rust, installed via <a href="https://rustup.rs" target="_blank" rel="noopener" style="color: var(--color-accent); text-decoration: underline;">rustup</a>.</p>
         </div>
         <div class="code-block">
+          <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
           <pre><span class="cmt"># clone and build</span>
-git clone &lt;repo-url&gt;
-cd arlo-rust
-cargo build --release
-
-<span class="cmt"># set credentials for your provider</span>
+git clone https://github.com/kaija/arlo.git
+cd arlo
+cargo build --release</pre>
+        </div>
+        <div class="code-block">
+          <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
+          <pre><span class="cmt"># set credentials for your provider</span>
 export OPENAI_API_KEY="sk-..."
 
 cargo run -p agent-cli                          <span class="cmt"># interactive TUI</span>
