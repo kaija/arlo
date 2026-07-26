@@ -507,13 +507,19 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn env_with_ollama() -> AssemblyEnv {
-        let mut m = HashMap::new();
-        m.insert(
-            "OLLAMA_HOST".to_string(),
-            "http://localhost:11434".to_string(),
-        );
-        AssemblyEnv(m)
+    /// Minimal env snapshot — no real credentials needed.
+    fn empty_env() -> AssemblyEnv {
+        AssemblyEnv::default()
+    }
+
+    /// Profile JSON for a fake openai provider — works without a real key because
+    /// `UnifiedProvider::from_profile` only checks that the key field is non-None,
+    /// not that it's valid. No HTTP call is made during assembly.
+    const FAKE_OPENAI_PROFILE: &str = r#"{"profiles":{"default":"local","local":{"provider":"openai","api_key":"sk-test","model":"openai:gpt-4o"}}}"#;
+
+    /// Write a settings file with the fake openai profile.
+    fn write_openai_profile(dir: &Path) {
+        write_settings(dir, FAKE_OPENAI_PROFILE);
     }
 
     fn write_settings(dir: &Path, json: &str) {
@@ -527,9 +533,10 @@ mod tests {
     #[test]
     fn serve_has_task_store() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Serve,
@@ -545,9 +552,10 @@ mod tests {
     #[test]
     fn tui_has_task_store() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Tui {
@@ -561,15 +569,15 @@ mod tests {
     #[test]
     fn single_prompt_has_no_task_store() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::SinglePrompt,
         })
         .unwrap();
-        // single-prompt has no background sub-agents, so no task store needed
         assert!(out.task_store.is_none());
         assert!(out.config.task_store.is_none());
     }
@@ -579,13 +587,14 @@ mod tests {
     #[test]
     fn settings_permissions_reach_engine() {
         let tmp = TempDir::new().unwrap();
+        // Profile + permissions in same settings file
         write_settings(
             tmp.path(),
-            r#"{"permissions":{"allow":["read_file"],"deny":["Bash(rm *)"]}}"#,
+            r#"{"profiles":{"default":"local","local":{"provider":"openai","api_key":"sk-test","model":"openai:gpt-4o"}},"permissions":{"allow":["read_file"],"deny":["Bash(rm *)"]}}"#,
         );
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Serve,
@@ -608,11 +617,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_settings(
             tmp.path(),
-            r#"{"permissions":{"allow":["fs_*"],"deny":[]}}"#,
+            r#"{"profiles":{"default":"local","local":{"provider":"openai","api_key":"sk-test","model":"openai:gpt-4o"}},"permissions":{"allow":["fs_*"],"deny":[]}}"#,
         );
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Serve,
@@ -634,18 +643,22 @@ mod tests {
 
     #[test]
     fn anthropic_base_url_applied_in_env_path() {
-        // On the env (no-profile) path, ANTHROPIC_BASE_URL must be passed through.
-        // We force the no-profile path by using model_override + ollama (no profile lookup).
+        // Verify assembly succeeds when a profile specifies a custom base_url.
+        // Use an ollama profile with an explicit base_url to keep CI credential-free.
         let tmp = TempDir::new().unwrap();
+        write_settings(
+            tmp.path(),
+            r#"{"profiles":{"default":"proxy","proxy":{"provider":"openai","api_key":"sk-test","model":"openai:gpt-4o","base_url":"https://custom-proxy.example.com/v1"}}}"#,
+        );
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
-            model_override: Some("ollama:llama3".to_string()),
+            env: empty_env(),
+            profile_name: Some("proxy".to_string()),
+            model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Serve,
         })
         .unwrap();
-        assert_eq!(out.model, "ollama:llama3");
+        assert_eq!(out.model, "openai:gpt-4o");
     }
 
     // --- model defaulting rule -----------------------------------------------
@@ -653,9 +666,10 @@ mod tests {
     #[test]
     fn model_override_respected() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: Some("ollama:codellama".to_string()),
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Serve,
@@ -671,10 +685,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_settings(
             tmp.path(),
-            r#"{"profiles":{"work":{"provider":"ollama","model":"llama3"}}}"#,
+            r#"{"profiles":{"work":{"provider":"openai","api_key":"sk-test","model":"openai:gpt-4o"}}}"#,
         );
         let result = assemble(AssemblyInputs {
-            env: env_with_ollama(),
+            env: empty_env(),
             profile_name: Some("nonexistent".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
@@ -715,9 +729,10 @@ mod tests {
     #[test]
     fn tui_normal_permissions() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Tui {
@@ -741,9 +756,10 @@ mod tests {
     #[test]
     fn tui_skip_permissions_bypasses() {
         let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
         let out = assemble(AssemblyInputs {
-            env: env_with_ollama(),
-            profile_name: None,
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
             surface: Surface::Tui {
