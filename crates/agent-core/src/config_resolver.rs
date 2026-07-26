@@ -302,7 +302,12 @@ impl ConfigResolver {
 mod tests {
     use super::*;
     use crate::profile::ProfileConfig;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Tests that call `resolve()` mutate the global HOME env var to isolate from
+    /// user-level settings. This mutex serializes those tests to prevent races.
+    static HOME_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_config_inputs_default() {
@@ -631,7 +636,10 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_when_no_profiles_and_no_flag() {
+        let _lock = HOME_MUTEX.lock().unwrap();
         let tmp = TempDir::new().unwrap();
+        // Override HOME so load_profiles_from_user() finds no settings file.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
         let inputs = ConfigInputs {
             profile_name: None,
             model_override: None,
@@ -1158,7 +1166,10 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_when_no_default_and_no_flag() {
+        let _lock = HOME_MUTEX.lock().unwrap();
         let tmp = TempDir::new().unwrap();
+        // Override HOME so load_profiles_from_user() finds no user-level default.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
         let arlo_dir = tmp.path().join(".arlo");
         fs::create_dir_all(&arlo_dir).unwrap();
 

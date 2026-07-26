@@ -28,3 +28,6 @@ glob = "0.3"
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-stream = "0.1"
+axum = "0.8"
+ag-ui-protocol = { git = "https://github.com/kaija/ag-ui-rust" }
+ag-ui-server = { git = "https://github.com/kaija/ag-ui-rust", features = ["axum"] }

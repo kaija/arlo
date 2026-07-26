@@ -9,6 +9,7 @@
 //! - `ANTHROPIC_API_KEY` for Anthropic models
 //! - `OLLAMA_HOST` for local Ollama models
 
+mod serve;
 mod tui;
 
 use std::path::PathBuf;
@@ -69,6 +70,8 @@ struct CliArgs {
     resume: Option<String>,
     /// When true, list stored sessions and exit.
     list_sessions: bool,
+    /// Serve mode: `Some(None)` = default addr, `Some(Some("..."))` = explicit addr.
+    serve: Option<Option<String>>,
 }
 
 /// Parse CLI arguments from a given slice (testable version).
@@ -86,6 +89,7 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
     let mut skip_permissions = false;
     let mut resume: Option<String> = None;
     let mut list_sessions = false;
+    let mut serve: Option<Option<String>> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -120,6 +124,15 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
             "--sessions" => {
                 list_sessions = true;
             }
+            "--serve" => {
+                // Peek at next arg: if it exists and doesn't start with "--", consume as value
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 1;
+                    serve = Some(Some(args[i].clone()));
+                } else {
+                    serve = Some(None);
+                }
+            }
             "--help" | "-h" => {
                 print_usage();
                 process::exit(0);
@@ -148,6 +161,7 @@ fn parse_args_from(args: &[String]) -> Result<CliArgs, String> {
         skip_permissions,
         resume,
         list_sessions,
+        serve,
     })
 }
 
@@ -178,6 +192,7 @@ fn print_usage() {
     eprintln!("  --yolo            Alias for --skip-permissions");
     eprintln!("  --resume <ID>     Resume a stored session (see --sessions)");
     eprintln!("  --sessions        List stored sessions (~/.arlo/sessions) and exit");
+    eprintln!("  --serve [ADDR]    Start AG-UI HTTP server (default: 127.0.0.1:8080)");
     eprintln!("  --help, -h        Show this help message");
     eprintln!();
     eprintln!("If PROMPT is provided, run in single-prompt mode (print response and exit).");
@@ -704,6 +719,32 @@ Additional tool guidance:
         process::exit(0);
     }
 
+    // Handle --serve: start AG-UI HTTP server and skip TUI/REPL
+    if let Some(ref addr_opt) = cli.serve {
+        let bind_addr = match serve::parse_serve_addr(addr_opt.as_deref()) {
+            Ok(addr) => addr,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        };
+        // Build agent and config for serve mode
+        let mut builder = Agent::builder("arlo").instructions(instructions);
+        for tool in &tools {
+            builder = builder.tool(tool.clone());
+        }
+        let agent = builder.build();
+        let config = RunConfig::builder(provider.clone(), &model)
+            .permissions(PermissionEngine::new(PermissionMode::Bypass))
+            .approval_handler(Arc::new(DenyAllApprovalHandler))
+            .build();
+        if let Err(e) = serve::start_server(bind_addr, agent, config).await {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
+
     // Dispatch to single-prompt or REPL mode
     match cli.prompt {
         Some(prompt_text) => {
@@ -791,5 +832,49 @@ mod tests {
         let result = parse_args_from(&args);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "--profile requires a value");
+    }
+
+    #[test]
+    fn test_serve_flag_no_value() {
+        let args = vec!["--serve".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.serve, Some(None));
+        assert_eq!(result.prompt, None);
+    }
+
+    #[test]
+    fn test_serve_flag_port_only() {
+        let args = vec!["--serve".to_string(), "9000".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.serve, Some(Some("9000".to_string())));
+    }
+
+    #[test]
+    fn test_serve_flag_host_port() {
+        let args = vec!["--serve".to_string(), "0.0.0.0:9000".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.serve, Some(Some("0.0.0.0:9000".to_string())));
+    }
+
+    #[test]
+    fn test_serve_flag_followed_by_another_flag() {
+        // --serve followed by --model should treat --serve as no-value
+        let args = vec![
+            "--serve".to_string(),
+            "--model".to_string(),
+            "openai:gpt-4".to_string(),
+        ];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.serve, Some(None));
+        assert_eq!(result.model, Some("openai:gpt-4".to_string()));
+    }
+
+    #[test]
+    fn test_serve_flag_at_end() {
+        // --serve at the end with no following arg
+        let args = vec!["--model".to_string(), "x".to_string(), "--serve".to_string()];
+        let result = parse_args_from(&args).unwrap();
+        assert_eq!(result.serve, Some(None));
+        assert_eq!(result.model, Some("x".to_string()));
     }
 }
