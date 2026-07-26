@@ -5,6 +5,10 @@
 //! execute tools → resolve next step → apply state transition. When driven
 //! through `run_stream`, `drive` emits `RunEvent`s over a channel as each
 //! phase happens (including per-chunk `StreamChunk` events).
+//!
+//! State changes (turn increment, FinalOutput gates, recovery bookkeeping,
+//! approval pairing) are owned by `transition::apply_transition`. `drive()`
+//! handles I/O: model calls, tool execution, event emission, compaction.
 
 use std::sync::Arc;
 
@@ -15,13 +19,13 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, Instructions, RunContext};
 use crate::compaction::config::CompactionLayerConfig;
-use crate::compaction::tokens::{compute_token_count, estimate_tokens};
+use crate::compaction::tokens::compute_token_count;
 use crate::compaction::CompactionPipeline;
-use crate::config::{ApprovalContext, ApprovalResponse, Input, RunConfig, RunResult};
+use crate::config::{Input, RunConfig, RunResult};
 use crate::error::RunError;
 use crate::event::{RunEvent, RunStream};
 use crate::executor::StreamingToolExecutor;
-use crate::guardrail::{InputGuardrail, OutputGuardrail};
+use crate::guardrail::InputGuardrail;
 use crate::message::{ContentBlock, Message, ToolUseBlock, Usage};
 use crate::model::{ModelRequest, ToolDefinition};
 use crate::next_step::{NextStep, PendingApproval, RecoveryStrategy};
@@ -30,6 +34,10 @@ use crate::recovery::RecoveryTracker;
 use crate::state::RunState;
 use crate::stream::{StopReason, StreamChunk};
 use crate::tool::{ToolContext, ToolOutput};
+use crate::transition::{
+    self, drain_task_notifications, extract_text_from_content, tool_output_to_string, LoopDecision,
+    TransitionInput,
+};
 
 /// Run an agent to completion, returning the final result.
 ///
@@ -141,12 +149,6 @@ async fn drive(
 
     // Main loop
     loop {
-        // Phase 0: Check turn limit
-        if state.current_turn >= max_turns {
-            emit(tx, RunEvent::MaxTurns { count: max_turns }).await;
-            return Ok(build_result_max_turns(&state));
-        }
-
         tracing::info!(turn = state.current_turn, "turn_start");
         // The only place we check for a dropped stream consumer — once per turn
         // is enough to stop abandoned runs without threading the check everywhere.
@@ -172,7 +174,7 @@ async fn drive(
             });
         }
 
-        // Phase 1: Context compaction (4-layer pipeline)
+        // Phase 1: Context compaction (3-layer pipeline)
         let token_count = compute_token_count(
             &state.messages,
             state.messages.iter().rev().find_map(|m| match m {
@@ -235,26 +237,38 @@ async fn drive(
             output_schema: agent.output_schema.clone(),
         };
 
-        // Phase 3: Stream model response, handling errors via the recovery system
+        // Phase 3: Stream model response, handling errors via the recovery system.
+        // Both error sites (model call + stream consumption) route through
+        // apply_transition(Recovery) to keep recovery logic in one place.
         let model_call_span = tracing::info_span!("model.call", model = %model.name());
         let model_stream = match model.stream(request).instrument(model_call_span).await {
             Ok(s) => s,
             Err(model_error) => {
                 tracing::error!(error = %model_error, "model_error");
                 let strategy = recovery_tracker.resolve_strategy(&model_error);
-                match apply_recovery_run(
-                    &strategy,
+                let decision = transition::apply_transition(
                     &mut state,
-                    &mut effective_max_output_tokens,
-                    model.as_ref(),
-                ) {
-                    RecoveryOutcome::Retry => continue,
-                    RecoveryOutcome::GiveUp(error) => {
-                        emit(tx, RunEvent::Error { error }).await;
-                        return Err(RunError::RecoveryExhausted(
-                            recovery_tracker.attempts_for(&model_error),
-                        ));
-                    }
+                    TransitionInput {
+                        next_step: NextStep::Recovery { strategy },
+                        assistant_content: Vec::new(),
+                        usage: Usage::default(),
+                        tool_results: Vec::new(),
+                        effective_max_output_tokens: &mut effective_max_output_tokens,
+                        recovery_tracker: &mut recovery_tracker,
+                        todo_continuation_count: &mut todo_continuation_count,
+                        max_turns,
+                        context_window: model.context_window(),
+                        config: &mut config,
+                        agent_name: agent.name.clone(),
+                        output_guardrails: &agent.output_guardrails,
+                        tx,
+                    },
+                )
+                .await;
+                match decision {
+                    LoopDecision::Continue => continue,
+                    LoopDecision::Terminal(r) => return Ok(*r),
+                    LoopDecision::Error(e) => return Err(e),
                 }
             }
         };
@@ -265,19 +279,29 @@ async fn drive(
                 Err(RunError::Model(model_error)) => {
                     tracing::error!(error = %model_error, "model_stream_error");
                     let strategy = recovery_tracker.resolve_strategy(&model_error);
-                    match apply_recovery_run(
-                        &strategy,
+                    let decision = transition::apply_transition(
                         &mut state,
-                        &mut effective_max_output_tokens,
-                        model.as_ref(),
-                    ) {
-                        RecoveryOutcome::Retry => continue,
-                        RecoveryOutcome::GiveUp(error) => {
-                            emit(tx, RunEvent::Error { error }).await;
-                            return Err(RunError::RecoveryExhausted(
-                                recovery_tracker.attempts_for(&model_error),
-                            ));
-                        }
+                        TransitionInput {
+                            next_step: NextStep::Recovery { strategy },
+                            assistant_content: Vec::new(),
+                            usage: Usage::default(),
+                            tool_results: Vec::new(),
+                            effective_max_output_tokens: &mut effective_max_output_tokens,
+                            recovery_tracker: &mut recovery_tracker,
+                            todo_continuation_count: &mut todo_continuation_count,
+                            max_turns,
+                            context_window: model.context_window(),
+                            config: &mut config,
+                            agent_name: agent.name.clone(),
+                            output_guardrails: &agent.output_guardrails,
+                            tx,
+                        },
+                    )
+                    .await;
+                    match decision {
+                        LoopDecision::Continue => continue,
+                        LoopDecision::Terminal(r) => return Ok(*r),
+                        LoopDecision::Error(e) => return Err(e),
                     }
                 }
                 // Non-model errors (e.g. dropped stream consumer) end the run as-is.
@@ -349,418 +373,35 @@ async fn drive(
             max_turns,
             agent,
             &config,
-            recovery_tracker.attempts_for_key("MaxOutputTokens"),
+            recovery_tracker.attempts_for_typed(crate::recovery::RecoveryKey::MaxOutputTokens),
         );
         emit(tx, RunEvent::StepResolved(next_step.clone())).await;
 
-        // Phase 6: Apply state transition
-        match next_step {
-            NextStep::Continue => {
-                // Reset recovery tracker on successful continuation
-                recovery_tracker.reset();
-                todo_continuation_count = 0;
-                push_turn_messages(&mut state, assistant_content, usage, &tool_results);
-                state.current_turn += 1;
-                // Loop back
-            }
+        // Phase 6: Apply state transition — all state mutations happen here.
+        let decision = transition::apply_transition(
+            &mut state,
+            TransitionInput {
+                next_step,
+                assistant_content,
+                usage,
+                tool_results,
+                effective_max_output_tokens: &mut effective_max_output_tokens,
+                recovery_tracker: &mut recovery_tracker,
+                todo_continuation_count: &mut todo_continuation_count,
+                max_turns,
+                context_window: model.context_window(),
+                config: &mut config,
+                agent_name: agent.name.clone(),
+                output_guardrails: &agent.output_guardrails,
+                tx,
+            },
+        )
+        .await;
 
-            NextStep::FinalOutput { text, structured } => {
-                // Check output guardrails before delivering the final output
-                if let Some((guardrail_name, reason)) =
-                    check_output_guardrails(&agent.output_guardrails, &text, structured.as_ref())
-                        .await
-                {
-                    emit(
-                        tx,
-                        RunEvent::GuardrailTripped {
-                            name: guardrail_name.clone(),
-                            reason: reason.clone(),
-                        },
-                    )
-                    .await;
-                    return Err(RunError::Guardrail(format!(
-                        "{}: {}",
-                        guardrail_name, reason
-                    )));
-                }
-
-                // Background-task-aware continuation: never finish while
-                // sub-agents are still running. Wait for the next one to reach
-                // a terminal state, inject its result, and let the model react.
-                // Bounded by the number of spawned tasks — each delivers once.
-                if let Some(notification) = await_background_tasks(&config, tx).await {
-                    state.messages.push(Message::Assistant {
-                        content: assistant_content.clone(),
-                        usage: Some(usage.clone()),
-                    });
-                    state.messages.push(Message::User {
-                        content: vec![ContentBlock::Text { text: notification }],
-                    });
-                    state.current_turn += 1;
-                    continue;
-                }
-
-                // Todo-aware continuation: if there are incomplete todos, inject a
-                // continuation prompt instead of terminating (max 3 consecutive continuations).
-                if todo_continuation_count < 3 {
-                    if let Some(continuation) = todo_continuation_prompt(&config).await {
-                        state.messages.push(Message::Assistant {
-                            content: assistant_content,
-                            usage: Some(usage),
-                        });
-                        state.messages.push(Message::User {
-                            content: vec![ContentBlock::Text { text: continuation }],
-                        });
-                        state.current_turn += 1;
-                        todo_continuation_count += 1;
-                        continue;
-                    }
-                }
-
-                // Append the final assistant message to state
-                state.messages.push(Message::Assistant {
-                    content: assistant_content,
-                    usage: Some(usage),
-                });
-                state.current_turn += 1;
-                emit(
-                    tx,
-                    RunEvent::AgentEnd {
-                        agent: agent.name.clone(),
-                        output: text.clone(),
-                        usage: state.total_usage.clone(),
-                    },
-                )
-                .await;
-                return Ok(RunResult {
-                    output: text,
-                    structured,
-                    usage: state.total_usage.clone(),
-                    cost_usd: state.total_cost_usd,
-                    turns: state.current_turn,
-                    state,
-                });
-            }
-
-            NextStep::MaxTurns { count } => {
-                emit(tx, RunEvent::MaxTurns { count }).await;
-                return Ok(build_result_max_turns(&state));
-            }
-
-            NextStep::Aborted { reason } => {
-                emit(
-                    tx,
-                    RunEvent::Aborted {
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-                return Err(RunError::Aborted(reason));
-            }
-
-            NextStep::Interruption { pending } => {
-                if let Some(handler) = config.approval_handler.clone() {
-                    // Inline approval: delegate to handler and process responses
-                    let context = ApprovalContext {
-                        agent_name: config.agent_name.clone(),
-                        pending: pending.clone(),
-                    };
-                    let responses = handler.request_approval(&context).await;
-
-                    // Pair each pending approval with its response.
-                    // The request_id format is "approval-{tool_use_id}"
-                    let approval_decisions: Vec<(&PendingApproval, &ApprovalResponse)> =
-                        pending.iter().zip(responses.iter()).collect();
-
-                    // Process each tool result: keep allowed ones, drop denied ones
-                    let mut final_tool_results = Vec::new();
-                    for tr in tool_results {
-                        let pending_match = approval_decisions.iter().find(|(pa, _)| {
-                            pa.request_id == format!("approval-{}", tr.tool_use_id)
-                        });
-
-                        match pending_match {
-                            Some((_pa, ApprovalResponse::Deny)) => {
-                                // Tool denied — we'll inject a denial result below
-                            }
-                            Some((_pa, ApprovalResponse::AlwaysAllow { pattern })) => {
-                                // Grant session-wide permission then keep result
-                                config.permissions.grant_session_allow(pattern);
-                                final_tool_results.push(tr);
-                            }
-                            // Allowed, or not a pending-approval tool: keep as-is
-                            _ => final_tool_results.push(tr),
-                        }
-                    }
-
-                    push_turn_messages(&mut state, assistant_content, usage, &final_tool_results);
-
-                    // Inject denial results for denied tools
-                    for (pa, response) in &approval_decisions {
-                        if matches!(response, ApprovalResponse::Deny) {
-                            let tool_use_id = pa
-                                .request_id
-                                .strip_prefix("approval-")
-                                .unwrap_or(&pa.request_id)
-                                .to_string();
-                            state.messages.push(Message::ToolResult {
-                                tool_use_id,
-                                content: format!(
-                                    "Permission denied: tool '{}' was not approved by the user.",
-                                    pa.tool_name
-                                ),
-                                is_error: true,
-                            });
-                        }
-                    }
-
-                    state.current_turn += 1;
-                    // Continue the loop — the model will see the results on next turn
-                } else {
-                    // No handler: return with the pending approvals recorded in state
-                    state.pending_approvals = pending.clone();
-                    emit(tx, RunEvent::Interruption { pending }).await;
-                    let output = extract_text_from_content(&assistant_content);
-                    return Ok(RunResult {
-                        output,
-                        structured: None,
-                        usage: state.total_usage.clone(),
-                        cost_usd: state.total_cost_usd,
-                        turns: state.current_turn,
-                        state,
-                    });
-                }
-            }
-
-            NextStep::Recovery { strategy } => {
-                match apply_recovery_run(
-                    &strategy,
-                    &mut state,
-                    &mut effective_max_output_tokens,
-                    model.as_ref(),
-                ) {
-                    RecoveryOutcome::Retry => {
-                        // Track the attempt for MaxTokens-related recoveries
-                        if matches!(
-                            strategy,
-                            RecoveryStrategy::ContinueMessage { .. }
-                                | RecoveryStrategy::EscalateOutputTokens { .. }
-                        ) {
-                            recovery_tracker.increment_key("MaxOutputTokens");
-                        }
-                        // Don't increment turn count for recovery retries
-                        continue;
-                    }
-                    RecoveryOutcome::GiveUp(error) => {
-                        emit(tx, RunEvent::Error { error }).await;
-                        return Err(RunError::RecoveryExhausted(
-                            crate::recovery::MAX_RECOVERY_ATTEMPTS,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Append the turn's assistant message and tool result messages to state.
-fn push_turn_messages(
-    state: &mut RunState,
-    assistant_content: Vec<ContentBlock>,
-    usage: Usage,
-    tool_results: &[crate::executor::ToolResult],
-) {
-    state.messages.push(Message::Assistant {
-        content: assistant_content,
-        usage: Some(usage),
-    });
-    for tr in tool_results {
-        let (content, is_error) = match &tr.result {
-            Ok(output) => (tool_output_to_string(output), false),
-            Err(e) => (format!("{}", e), true),
-        };
-        state.messages.push(Message::ToolResult {
-            tool_use_id: tr.tool_use_id.clone(),
-            content,
-            is_error,
-        });
-    }
-}
-
-/// Build the todo-aware continuation prompt if the task store has incomplete todos.
-async fn todo_continuation_prompt(config: &RunConfig) -> Option<String> {
-    let store = config.task_store.as_ref()?;
-    let todos = store.list_todos().await.ok()?;
-    let incomplete: Vec<_> = todos
-        .iter()
-        .filter(|t| t.status != crate::task_store::TodoStatus::Completed)
-        .collect();
-    if incomplete.is_empty() {
-        return None;
-    }
-    let todo_summary: Vec<String> = incomplete
-        .iter()
-        .map(|t| {
-            format!(
-                "- [{}] {}",
-                match t.status {
-                    crate::task_store::TodoStatus::Pending => " ",
-                    crate::task_store::TodoStatus::InProgress => "~",
-                    crate::task_store::TodoStatus::Completed => "x",
-                },
-                t.content
-            )
-        })
-        .collect();
-    Some(format!(
-        "You have {} incomplete todo item(s). Continue working through them:\n{}",
-        incomplete.len(),
-        todo_summary.join("\n")
-    ))
-}
-
-/// Drain unacknowledged terminal background tasks into a notification message.
-///
-/// Acknowledges each task so its result is delivered to the model exactly once.
-/// Returns None when there is no task store or nothing new to report.
-async fn drain_task_notifications(config: &RunConfig) -> Option<String> {
-    let store = config.task_store.as_ref()?;
-    let tasks = store.list_unacknowledged_terminal().await.ok()?;
-    if tasks.is_empty() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    for task in &tasks {
-        let line = match task.status {
-            crate::task_store::TaskStatus::Completed => format!(
-                "[background task completed] {} (task_id={})\nResult: {}",
-                task.description,
-                task.id,
-                task.output.as_deref().unwrap_or("(no output)")
-            ),
-            _ => format!(
-                "[background task failed] {} (task_id={})\nError: {}",
-                task.description,
-                task.id,
-                task.last_error
-                    .as_deref()
-                    .or(task.output.as_deref())
-                    .unwrap_or("(no details)")
-            ),
-        };
-        lines.push(line);
-        let _ = store.acknowledge_task(&task.id).await;
-    }
-    Some(lines.join("\n\n"))
-}
-
-/// Block until at least one unfinished background task reaches a terminal
-/// state, then drain and return its notification. Returns None immediately
-/// when there is no task store, no unfinished tasks, or the stream consumer
-/// went away.
-async fn await_background_tasks(
-    config: &RunConfig,
-    tx: Option<&mpsc::Sender<RunEvent>>,
-) -> Option<String> {
-    let store = config.task_store.as_ref()?;
-    // ponytail: 200ms polling with a 10-min ceiling; switch to a store-side
-    // notify channel if sub-agents ever legitimately run longer.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    loop {
-        if let Some(text) = drain_task_notifications(config).await {
-            return Some(text);
-        }
-        let counts = store.count_by_status().await.ok()?;
-        if counts.pending == 0 && counts.running == 0 {
-            return None;
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        if let Some(tx) = tx {
-            if tx.is_closed() {
-                return None;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-}
-
-// --- Recovery helpers ---
-
-/// Outcome of applying a recovery strategy.
-enum RecoveryOutcome {
-    /// The recovery was applied successfully; the loop should retry.
-    Retry,
-    /// Recovery is exhausted; terminate with this error message.
-    GiveUp(String),
-}
-
-/// Apply a recovery strategy to the run state.
-///
-/// - CompactAndRetry: Force-snip the message history, then retry.
-/// - ContinueMessage: Append a continuation prompt to messages, retry.
-/// - EscalateOutputTokens: Increase effective_max_output_tokens, retry.
-/// - GiveUp: Return GiveUp with the error message.
-fn apply_recovery_run(
-    strategy: &RecoveryStrategy,
-    state: &mut RunState,
-    effective_max_output_tokens: &mut Option<u32>,
-    model: &dyn crate::model::Model,
-) -> RecoveryOutcome {
-    match strategy {
-        RecoveryStrategy::CompactAndRetry => {
-            // ponytail: brute-force snip to half the context window; graceful
-            // compaction is the pipeline's job — this only fires when the
-            // provider still rejects the prompt as too long.
-            snip_history(&mut state.messages, model.context_window() / 2);
-            RecoveryOutcome::Retry
-        }
-
-        RecoveryStrategy::ContinueMessage { attempt: _ } => {
-            // Append a continuation prompt as a user message
-            state.messages.push(Message::User {
-                content: vec![ContentBlock::Text {
-                    text: "Please continue from where you left off.".to_string(),
-                }],
-            });
-            RecoveryOutcome::Retry
-        }
-
-        RecoveryStrategy::EscalateOutputTokens { max } => {
-            // Increase max_output_tokens, capped at model's maximum
-            let model_max = model.max_output_tokens() as u32;
-            let new_max = if *max > 0 {
-                (*max).min(model_max)
-            } else {
-                // Default: double the current value or use model max
-                let current = effective_max_output_tokens.unwrap_or(4096);
-                (current * 2).min(model_max)
-            };
-            *effective_max_output_tokens = Some(new_max);
-            RecoveryOutcome::Retry
-        }
-
-        RecoveryStrategy::GiveUp { error } => RecoveryOutcome::GiveUp(error.clone()),
-    }
-}
-
-/// Remove oldest non-system messages (preserving the most recent user message)
-/// until the chars/4 token estimate fits within `max_tokens`.
-fn snip_history(messages: &mut Vec<Message>, max_tokens: usize) {
-    while estimate_tokens(messages) > max_tokens {
-        let last_user = messages
-            .iter()
-            .rposition(|m| matches!(m, Message::User { .. }));
-        let removable = messages
-            .iter()
-            .enumerate()
-            .position(|(idx, m)| !matches!(m, Message::System { .. }) && Some(idx) != last_user);
-        match removable {
-            Some(idx) => {
-                messages.remove(idx);
-            }
-            None => break,
+        match decision {
+            LoopDecision::Continue => { /* loop back */ }
+            LoopDecision::Terminal(result) => return Ok(*result),
+            LoopDecision::Error(e) => return Err(e),
         }
     }
 }
@@ -1074,27 +715,6 @@ fn resolve_next_step(
     NextStep::FinalOutput { text, structured }
 }
 
-/// Extract text content from assistant content blocks.
-fn extract_text_from_content(content: &[ContentBlock]) -> String {
-    content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Convert a ToolOutput to its string representation.
-fn tool_output_to_string(output: &ToolOutput) -> String {
-    match output {
-        ToolOutput::Text(s) => s.clone(),
-        ToolOutput::Structured(v) => serde_json::to_string(v).unwrap_or_default(),
-        ToolOutput::Error(s) => s.clone(),
-    }
-}
-
 /// Accumulate usage from a turn into the RunState totals.
 fn accumulate_usage(state: &mut RunState, usage: &Usage, model: &dyn crate::model::Model) {
     state.total_usage.input_tokens += usage.input_tokens;
@@ -1130,54 +750,10 @@ async fn check_input_guardrails(
     None
 }
 
-/// Check output guardrails sequentially in registration order.
-///
-/// Returns `Some((guardrail_name, reason))` if any guardrail fails, `None` if all pass.
-/// Short-circuits at the first failure — subsequent guardrails are not checked.
-async fn check_output_guardrails(
-    guardrails: &[Arc<dyn OutputGuardrail>],
-    output: &str,
-    structured: Option<&serde_json::Value>,
-) -> Option<(String, String)> {
-    for guardrail in guardrails {
-        let result = guardrail.check(output, structured).await;
-        if !result.passed {
-            let reason = result
-                .reason
-                .unwrap_or_else(|| "guardrail check failed".to_string());
-            return Some((guardrail.name().to_string(), reason));
-        }
-    }
-    None
-}
-
-/// Build a RunResult for a MaxTurns termination.
-fn build_result_max_turns(state: &RunState) -> RunResult {
-    let output = extract_text_from_last_assistant(&state.messages);
-    RunResult {
-        output,
-        structured: None,
-        usage: state.total_usage.clone(),
-        cost_usd: state.total_cost_usd,
-        turns: state.current_turn,
-        state: state.clone(),
-    }
-}
-
-/// Extract text from the last assistant message in history.
-fn extract_text_from_last_assistant(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find_map(|msg| match msg {
-            Message::Assistant { content, .. } => Some(extract_text_from_content(content)),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ApprovalContext, ApprovalResponse};
     use crate::error::ModelError;
     use crate::model::{Model, ModelProvider, ModelRequest, ModelResponse, ModelStream};
     use crate::stream::{StopReason, StreamChunk};
