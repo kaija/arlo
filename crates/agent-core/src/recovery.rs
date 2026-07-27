@@ -13,6 +13,26 @@ use crate::next_step::RecoveryStrategy;
 /// Maximum number of recovery attempts per error variant before escalating to GiveUp.
 pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
+/// Typed key for tracking recovery attempts within the transition applier.
+///
+/// Replaces the string literal `"MaxOutputTokens"` that was spelled at two call
+/// sites and whose threshold was defined at a third. Adding a new tracked variant
+/// now requires adding an enum arm — a typo cannot silently reset the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecoveryKey {
+    /// Tracks `ContinueMessage` / `EscalateOutputTokens` attempts triggered by
+    /// `StopReason::MaxTokens` during a normal turn (not a model-call error).
+    MaxOutputTokens,
+}
+
+impl RecoveryKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            RecoveryKey::MaxOutputTokens => "MaxOutputTokens",
+        }
+    }
+}
+
 /// Tracks recovery attempts per error variant within a single run.
 ///
 /// Each error variant is keyed by a discriminant string (e.g. "PromptTooLong",
@@ -70,6 +90,16 @@ impl RecoveryTracker {
     pub fn increment_key(&mut self, key: &'static str) {
         let count = self.attempts.entry(key).or_insert(0);
         *count += 1;
+    }
+
+    /// Get the current attempt count for a typed `RecoveryKey`.
+    pub fn attempts_for_typed(&self, key: RecoveryKey) -> u32 {
+        self.attempts_for_key(key.as_str())
+    }
+
+    /// Increment the attempt counter for a typed `RecoveryKey`.
+    pub fn increment_typed(&mut self, key: RecoveryKey) {
+        self.increment_key(key.as_str());
     }
 
     /// Reset all tracked attempts.

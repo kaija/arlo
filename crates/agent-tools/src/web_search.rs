@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use agent_core::error::ToolError;
-use agent_core::tool::{Concurrency, Tool, ToolContext, ToolOutput};
+use agent_core::tool::{ApprovalRequirement, Concurrency, Tool, ToolContext, ToolOutput};
 
 /// Trait for pluggable search backends.
 ///
@@ -79,6 +79,10 @@ impl Tool for WebSearchTool {
 
     fn concurrency(&self, _input: &Value) -> Concurrency {
         Concurrency::Safe
+    }
+
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Always
     }
 
     fn timeout(&self) -> Duration {
