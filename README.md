@@ -88,6 +88,8 @@ See [doc/configuration.md](doc/configuration.md) for the full reference.
 
 ## Documentation
 
+- [The Agent Loop](https://kaija.github.io/arlo/agent-loop.html) — visual walkthrough
+  of a turn, from trigger through the agentic loop to session end
 - [doc/configuration.md](doc/configuration.md) — settings, permission patterns, profiles
 - [doc/agent-framework.md](doc/agent-framework.md) — full architecture deep-dive
 - [doc/sub-agent-task-coordination.md](doc/sub-agent-task-coordination.md) — sub-agent

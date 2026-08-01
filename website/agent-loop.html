@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XSG16Z343H"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XSG16Z343H');
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Agent Loop — Arlo</title>
+  <meta name="description" content="How Arlo processes a turn: triggers, context preparation, model reasoning, and the agentic loop of plan, tool selection, permission check, execute, observe, and evaluate." />
+  <meta name="theme-color" content="#5856D6" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="The Agent Loop — Arlo" />
+  <meta property="og:description" content="How Arlo processes a turn: triggers, context preparation, model reasoning, and the agentic loop of plan, execute, observe, and evaluate." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="assets/agent-loop.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav" aria-label="Main navigation">
+    <div class="nav-inner container">
+      <a href="/" class="nav-brand" aria-label="Arlo home">
+        <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="7" fill="#5856D6"/>
+          <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Arlo</span>
+      </a>
+      <div class="nav-links">
+        <a href="index.html#quickstart">Quick Start</a>
+        <a href="index.html#features">Features</a>
+        <a href="agent-loop.html">Agent Loop</a>
+        <a href="index.html#built">How It's Built</a>
+        <a href="index.html#providers">Providers</a>
+        <a href="https://github.com/kaija/arlo" class="btn btn-sm" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Page header -->
+  <header class="page-hero">
+    <div class="container">
+      <a class="page-back" href="index.html">&larr; Back to overview</a>
+      <h1>The Agent Loop</h1>
+      <p>Every request follows the same path: prepare context, reason about the task, then loop through tool calls until the work is done. This is the core processing logic behind every Arlo run — in the TUI, the one-shot CLI, or the library.</p>
+    </div>
+  </header>
+
+  <!-- Loop -->
+  <section class="loop">
+    <div class="container">
+      <div class="loop-grid">
+        <figure class="loop-figure">
+          <a href="assets/agent-loop.png" target="_blank" rel="noopener" aria-label="Open the full-size agent loop diagram">
+            <img src="assets/agent-loop.png" width="1024" height="1568"
+                 alt="Flowchart of the agent loop: a prompt from a user, schedule, event, notification, or MCP request enters context preparation and model reasoning, then repeats plan, tool selection, permission check, tool execute, observe result, memory update, and task evaluation until no more action is needed, ending in a final response, post processing, and a session end that can later resume." />
+          </a>
+          <figcaption>The full run loop, from trigger to session end — click to enlarge.</figcaption>
+        </figure>
+        <div class="loop-phases">
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-trigger">Triggers</span>
+            <p>A turn starts from a user prompt, a scheduled task, an event or webhook, a notification, or an MCP request. Whatever the source, it enters the same pipeline — nothing gets a private code path.</p>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-request">Each request</span>
+            <ol class="loop-list">
+              <li><strong>Prompt</strong> — the incoming request, normalized regardless of which trigger produced it.</li>
+              <li><strong>Context preparation</strong> — retrieve, assemble, and compress history, files, and tool schemas to fit the context window.</li>
+              <li><strong>Model reasoning</strong> — the model understands the task and plans an approach before touching anything.</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-agentic">Agentic loop</span>
+            <ol class="loop-list">
+              <li><strong>Plan next action</strong> — decide the single next step.</li>
+              <li><strong>Tool selection</strong> — choose the best tool for that step.</li>
+              <li><strong>Permission check</strong> — the human-in-the-loop gate; a rejected call never runs.</li>
+              <li><strong>Tool execute</strong> — perform the action.</li>
+              <li><strong>Observe result</strong> — collect output and feedback, including failures.</li>
+              <li><strong>Memory update</strong> — fold the result back into context and session state.</li>
+              <li><strong>Task evaluation</strong> — is more work needed? If yes, loop back to planning; if no, exit the loop.</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-done">Completion</span>
+            <ol class="loop-list">
+              <li><strong>Final response</strong> — generate, summarize, and deliver the answer.</li>
+              <li><strong>Post processing</strong> — logs, audit trail, and telemetry.</li>
+              <li><strong>Session end</strong> — state is persisted, so a later trigger can resume the same session.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+      <p class="loop-footnote">
+        Each step streams as an event, which is what the TUI renders live and what an embedding application can subscribe to.
+        <a href="index.html#built">See how it's built &rarr;</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg class="nav-logo" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect width="28" height="28" rx="7" fill="#5856D6"/>
+            <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <span>Arlo</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/kaija/arlo" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/kaija/arlo/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>

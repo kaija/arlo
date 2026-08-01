@@ -87,6 +87,8 @@ Skills 放在 `.arlo/skills/`（專案層級）與 `~/.arlo/skills/`（使用者
 
 ## 文件
 
+- [The Agent Loop](https://kaija.github.io/arlo/agent-loop.html) —— 圖解一個 turn
+  從觸發到 agentic loop 再到結束的完整流程
 - [doc/configuration.md](doc/configuration.md) —— 設定、權限規則、profiles
 - [doc/agent-framework.md](doc/agent-framework.md) —— 完整架構深入介紹
 - [doc/sub-agent-task-coordination.md](doc/sub-agent-task-coordination.md) —— sub-agent

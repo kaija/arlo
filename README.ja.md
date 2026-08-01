@@ -91,6 +91,8 @@ Skills は `.arlo/skills/`（プロジェクト単位）と `~/.arlo/skills/`（
 
 ## ドキュメント
 
+- [The Agent Loop](https://kaija.github.io/arlo/agent-loop.html) —— トリガーから
+  agentic loop、セッション終了までの実行フローを図解
 - [doc/configuration.md](doc/configuration.md) —— 設定、権限パターン、profiles
 - [doc/agent-framework.md](doc/agent-framework.md) —— アーキテクチャの詳細解説
 - [doc/sub-agent-task-coordination.md](doc/sub-agent-task-coordination.md) ——
