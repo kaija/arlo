@@ -544,7 +544,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
         assert!(out.task_store.is_some(), "serve must have a task store");
@@ -602,7 +604,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
 
@@ -629,7 +633,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
 
@@ -660,7 +666,9 @@ mod tests {
             profile_name: Some("proxy".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
         assert_eq!(out.model, "openai:gpt-4o");
@@ -677,7 +685,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: Some("ollama:codellama".to_string()),
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
         assert_eq!(out.model, "ollama:codellama");
@@ -697,7 +707,9 @@ mod tests {
             profile_name: Some("nonexistent".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         });
         assert!(
             matches!(result, Err(AssemblyError::UnknownProfile(ref n)) if n == "nonexistent"),
@@ -721,7 +733,9 @@ mod tests {
             profile_name: None,
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         });
         assert!(
             matches!(result, Err(AssemblyError::MissingCredentials { .. })),
@@ -740,7 +754,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
         use agent_core::{permission::PermissionDecision, tool::ApprovalRequirement};
@@ -763,7 +779,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: true },
+            surface: Surface::Serve {
+                skip_permissions: true,
+            },
         })
         .unwrap();
         use agent_core::{permission::PermissionDecision, tool::ApprovalRequirement};
@@ -786,7 +804,9 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve { skip_permissions: false },
+            surface: Surface::Serve {
+                skip_permissions: false,
+            },
         })
         .unwrap();
         assert!(
