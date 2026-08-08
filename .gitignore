@@ -11,3 +11,7 @@ docs/superpowers
 .DS_Store
 /.env
 /integration/web/.env
+/integration/slack/.env
+/integration/slack/.venv
+__pycache__/
+.pytest_cache/

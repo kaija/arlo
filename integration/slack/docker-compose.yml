@@ -1,0 +1,30 @@
+services:
+  arlo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["arlo", "--model", "${ARLO_MODEL}", "--serve", "0.0.0.0:8080"]
+    env_file: [.env]
+    working_dir: /workspace
+    read_only: true
+    tmpfs:
+      - /workspace
+      - /tmp
+    user: "10001:10001"
+    mem_limit: 2g
+    pids_limit: 256
+    # No ports: — reachable only on the compose network at http://arlo:8080.
+    # No volumes: — an unattended tool call cannot touch the host.
+
+  slack-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: [.env]
+    environment:
+      ARLO_URL: http://arlo:8080/
+    depends_on: [arlo]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "10001:10001"
+    restart: unless-stopped
