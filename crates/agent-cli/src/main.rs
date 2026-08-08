@@ -389,7 +389,9 @@ async fn main() {
     // surface before assembly, but assembly may fail so we handle dump-prompt
     // after a successful assemble call.
     let surface = if cli.serve.is_some() {
-        assembly::Surface::Serve
+        assembly::Surface::Serve {
+            skip_permissions: cli.skip_permissions,
+        }
     } else if cli.prompt.is_some() {
         assembly::Surface::SinglePrompt
     } else {

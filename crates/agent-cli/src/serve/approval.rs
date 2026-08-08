@@ -28,7 +28,9 @@ impl ApprovalHandler for AgUiApprovalHandler {
         // 1. Create oneshot channel for receiving resume decisions
         let (tx, rx) = oneshot::channel();
 
-        // 2. Register interrupt state in SessionStore (stores tx, pending approvals)
+        // 2. Register interrupt state in SessionStore (stores tx, pending approvals).
+        // The real ParkedRun is set by bridge.rs via `update_parked` after the drain
+        // loop returns Interrupted — by which point the stream ownership has settled.
         self.sessions
             .mark_interrupted(&self.thread_id, pending.clone(), tx);
 
@@ -199,7 +201,7 @@ mod tests {
                 created_at: Instant::now(),
                 last_active: Instant::now(),
                 resume_tx: None,
-                task_handle: tokio::spawn(async {}),
+                parked: None,
             },
         );
 
@@ -257,7 +259,7 @@ mod tests {
                 created_at: Instant::now(),
                 last_active: Instant::now(),
                 resume_tx: None,
-                task_handle: tokio::spawn(async {}),
+                parked: None,
             },
         );
 

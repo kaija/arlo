@@ -38,8 +38,11 @@ pub enum Surface {
     /// approval handler (supplied by the caller after assembly).
     Tui { skip_permissions: bool },
     /// AG-UI HTTP server. Like single-prompt but keeps a `TaskStore` so
-    /// background sub-agent results are delivered to the model.
-    Serve,
+    /// background sub-agent results are delivered to the model. The Bridge
+    /// installs its own `AgUiApprovalHandler` per run, so assembly leaves the
+    /// approval handler unset (None). Pass `skip_permissions: true` (--yolo)
+    /// to bypass the permission engine entirely.
+    Serve { skip_permissions: bool },
     /// Single-shot prompt. Uses `PermissionMode::Bypass` + `DenyAllApprovalHandler`.
     SinglePrompt,
 }
@@ -317,14 +320,14 @@ fn build_run_config(
     task_store: Option<Arc<dyn TaskStore>>,
 ) -> RunConfig {
     let permission_mode = match surface {
-        Surface::Tui { skip_permissions } => {
+        Surface::Tui { skip_permissions } | Surface::Serve { skip_permissions } => {
             if *skip_permissions {
                 PermissionMode::Bypass
             } else {
                 PermissionMode::Normal
             }
         }
-        Surface::Serve | Surface::SinglePrompt => PermissionMode::Bypass,
+        Surface::SinglePrompt => PermissionMode::Bypass,
     };
 
     let mut builder = RunConfig::builder(Arc::clone(provider), model)
@@ -333,11 +336,13 @@ fn build_run_config(
 
     // Serve and single-prompt use DenyAll; TUI wires its own interactive handler
     // after assembly via `config.approval_handler = Some(...)`.
+    // Serve leaves approval_handler as None — the Bridge installs AgUiApprovalHandler
+    // per run, so a deny-all here would only silence approvals before the Bridge sets it.
     match surface {
-        Surface::Tui { .. } => {
-            // Leave approval_handler as None — TUI sets it when creating the run.
+        Surface::Tui { .. } | Surface::Serve { .. } => {
+            // Leave approval_handler as None.
         }
-        Surface::Serve | Surface::SinglePrompt => {
+        Surface::SinglePrompt => {
             builder = builder.approval_handler(Arc::new(DenyAllApprovalHandler));
         }
     }
@@ -539,7 +544,7 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         })
         .unwrap();
         assert!(out.task_store.is_some(), "serve must have a task store");
@@ -597,7 +602,7 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         })
         .unwrap();
 
@@ -624,7 +629,7 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         })
         .unwrap();
 
@@ -655,7 +660,7 @@ mod tests {
             profile_name: Some("proxy".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         })
         .unwrap();
         assert_eq!(out.model, "openai:gpt-4o");
@@ -672,7 +677,7 @@ mod tests {
             profile_name: Some("local".to_string()),
             model_override: Some("ollama:codellama".to_string()),
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         })
         .unwrap();
         assert_eq!(out.model, "ollama:codellama");
@@ -692,7 +697,7 @@ mod tests {
             profile_name: Some("nonexistent".to_string()),
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         });
         assert!(
             matches!(result, Err(AssemblyError::UnknownProfile(ref n)) if n == "nonexistent"),
@@ -716,7 +721,7 @@ mod tests {
             profile_name: None,
             model_override: None,
             working_dir: tmp.path().to_path_buf(),
-            surface: Surface::Serve,
+            surface: Surface::Serve { skip_permissions: false },
         });
         assert!(
             matches!(result, Err(AssemblyError::MissingCredentials { .. })),
@@ -725,6 +730,70 @@ mod tests {
     }
 
     // --- tui permission mode -------------------------------------------------
+
+    #[test]
+    fn serve_normal_mode_needs_approval() {
+        let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
+        let out = assemble(AssemblyInputs {
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
+            model_override: None,
+            working_dir: tmp.path().to_path_buf(),
+            surface: Surface::Serve { skip_permissions: false },
+        })
+        .unwrap();
+        use agent_core::{permission::PermissionDecision, tool::ApprovalRequirement};
+        let decision = out
+            .config
+            .permissions
+            .check("shell", &ApprovalRequirement::Always, None);
+        assert!(
+            matches!(decision, PermissionDecision::NeedsApproval { .. }),
+            "Serve normal mode: shell Always should need approval"
+        );
+    }
+
+    #[test]
+    fn serve_skip_permissions_bypasses() {
+        let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
+        let out = assemble(AssemblyInputs {
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
+            model_override: None,
+            working_dir: tmp.path().to_path_buf(),
+            surface: Surface::Serve { skip_permissions: true },
+        })
+        .unwrap();
+        use agent_core::{permission::PermissionDecision, tool::ApprovalRequirement};
+        let decision = out
+            .config
+            .permissions
+            .check("shell", &ApprovalRequirement::Always, None);
+        assert!(
+            matches!(decision, PermissionDecision::Allow { .. }),
+            "Serve skip-permissions: shell Always should be auto-allowed in Bypass mode"
+        );
+    }
+
+    #[test]
+    fn serve_no_deny_all_handler() {
+        let tmp = TempDir::new().unwrap();
+        write_openai_profile(tmp.path());
+        let out = assemble(AssemblyInputs {
+            env: empty_env(),
+            profile_name: Some("local".to_string()),
+            model_override: None,
+            working_dir: tmp.path().to_path_buf(),
+            surface: Surface::Serve { skip_permissions: false },
+        })
+        .unwrap();
+        assert!(
+            out.config.approval_handler.is_none(),
+            "Serve mode must leave approval_handler as None — Bridge installs its own per-run"
+        );
+    }
 
     #[test]
     fn tui_normal_permissions() {

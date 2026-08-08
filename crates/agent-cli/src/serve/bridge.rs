@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use ag_ui_protocol::{
     BaseEvent, Event, Interrupt, RunAgentInput, RunErrorEvent, RunFinishedEvent,
-    RunFinishedOutcome, StepStartedEvent, TextMessageContentEvent, TextMessageEndEvent,
-    TextMessageRole, TextMessageStartEvent, ToolCallArgsEvent, ToolCallEndEvent,
-    ToolCallStartEvent,
+    RunFinishedOutcome, StepFinishedEvent, StepStartedEvent, TextMessageContentEvent,
+    TextMessageEndEvent, TextMessageRole, TextMessageStartEvent, ToolCallArgsEvent,
+    ToolCallEndEvent, ToolCallResultEvent, ToolCallStartEvent, ToolResultRole,
 };
 use ag_ui_server::{AgentError, EventEmitter, RunOutcome};
 use agent_core::agent::Agent;
@@ -21,11 +21,136 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::approval::{map_resume_to_responses, AgUiApprovalHandler};
-use super::session::{RunSession, SessionState, SessionStore};
+use super::session::{ParkedRun, RunSession, RunStream, SessionState, SessionStore};
+
+// ---------------------------------------------------------------------------
+// DrainOutcome
+// ---------------------------------------------------------------------------
+
+/// Outcome of draining a run stream.
+pub enum DrainOutcome {
+    /// The stream ran to completion (terminal AG-UI event emitted).
+    Finished,
+    /// The run was interrupted — the pending approvals are returned.
+    Interrupted(Vec<PendingApproval>),
+    /// The run failed or the client disconnected.
+    Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// drain — shared drain loop used by both the new-run and resume paths
+// ---------------------------------------------------------------------------
+
+/// Drain a run stream, mapping events through `mapper` and emitting them
+/// through `emitter`, until a terminal event or an interrupt occurs.
+///
+/// Returns:
+/// - `DrainOutcome::Finished` when a terminal event is emitted
+/// - `DrainOutcome::Interrupted(pending)` when the approval handler signals an interrupt
+/// - `DrainOutcome::Failed(msg)` on run error or client disconnect
+async fn drain(
+    stream: &mut RunStream,
+    mapper: &mut EventMapper,
+    emitter: &EventEmitter,
+    interrupt_rx: &mut mpsc::Receiver<Vec<PendingApproval>>,
+) -> DrainOutcome {
+    loop {
+        tokio::select! {
+            event = stream.next() => {
+                match event {
+                    Some(run_event) => {
+                        let ag_events = mapper.map_event(run_event);
+                        for ev in ag_events {
+                            match &ev {
+                                Event::RunFinished(_) => {
+                                    // Do NOT emit the terminal event through the emitter.
+                                    // run_agent (the outer pipeline) owns the terminal
+                                    // RUN_FINISHED/RUN_ERROR lifecycle events; the bridge
+                                    // signals completion by returning RunOutcome/AgentError.
+                                    // Emitting here would produce a protocol-violating
+                                    // duplicate terminal event.
+                                    return DrainOutcome::Finished;
+                                }
+                                Event::RunError(e) => {
+                                    let msg = e.message.clone();
+                                    // Same reasoning: let run_agent emit RUN_ERROR from
+                                    // the AgentError we return, rather than double-emitting.
+                                    return DrainOutcome::Failed(msg);
+                                }
+                                _ => {
+                                    if emitter.emit(ev).await.is_err() {
+                                        return DrainOutcome::Failed(
+                                            "client disconnected".to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // Stream ended without a terminal event — flush and finish.
+                        let flush = mapper.finish();
+                        for ev in flush {
+                            let _ = emitter.emit(ev).await;
+                        }
+                        return DrainOutcome::Finished;
+                    }
+                }
+            }
+            pending = interrupt_rx.recv() => {
+                if let Some(pending_approvals) = pending {
+                    // Flush any open text message before parking.
+                    let flush = mapper.finish();
+                    for ev in flush {
+                        let _ = emitter.emit(ev).await;
+                    }
+                    return DrainOutcome::Interrupted(pending_approvals);
+                }
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ArloBridge — implements ag_ui_server::Agent
 // ---------------------------------------------------------------------------
+
+/// Convert a list of `PendingApproval`s into AG-UI `Interrupt`s.
+///
+/// `request_id` is `"approval-{tool_call_id}"` (set in `run_loop.rs`).
+/// `id` keeps the full `request_id` (resume correlation key).
+/// `tool_call_id` strips the prefix so the client can match the `TOOL_CALL_START`.
+fn pending_to_interrupts(pending: Vec<PendingApproval>) -> Vec<Interrupt> {
+    pending
+        .into_iter()
+        .map(|p| {
+            let tool_call_id = p
+                .request_id
+                .strip_prefix("approval-")
+                .map(str::to_string);
+            Interrupt {
+                id: p.request_id.clone(),
+                reason: "tool_call".to_string(),
+                message: Some(format!(
+                    "Run {}: {}",
+                    p.tool_name,
+                    serde_json::to_string(&p.tool_input).unwrap_or_default()
+                )),
+                tool_call_id,
+                response_schema: None,
+                expires_at: Some(
+                    (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                ),
+                metadata: Some(
+                    serde_json::json!({ "toolName": p.tool_name, "toolInput": p.tool_input })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            }
+        })
+        .collect()
+}
 
 /// Bridges AG-UI protocol requests to Arlo's run loop.
 pub struct ArloBridge {
@@ -117,34 +242,80 @@ impl ag_ui_server::Agent for ArloBridge {
             // --- Resume path ---
             if let Some(ref resume_entries) = input.resume {
                 if !resume_entries.is_empty() {
-                    let session = sessions.remove(&thread_id);
-                    match session {
-                        Some(session) => match session.state {
-                            SessionState::Interrupted { .. } => {
-                                let responses = map_resume_to_responses(resume_entries);
-                                // Deliver decisions via the oneshot channel
-                                if let Some(tx) = session.resume_tx {
-                                    let _ = tx.send(responses);
-                                }
-                                // ponytail: reattach to the running task's event stream
-                                // is deferred — the background task already ran to
-                                // completion or will be picked up on next request.
-                                // For now we return success; full reattach requires
-                                // an event-forwarding channel added to RunSession.
-                                return Ok(RunOutcome::success());
-                            }
-                            _ => {
-                                return Err(AgentError::msg(format!(
-                                    "No suspended run for thread_id '{thread_id}'"
-                                )));
-                            }
-                        },
+                    let mut session = match sessions.remove(&thread_id) {
+                        Some(s) => s,
                         None => {
                             return Err(AgentError::msg(format!(
                                 "No suspended run for thread_id '{thread_id}'"
                             )));
                         }
+                    };
+
+                    let SessionState::Interrupted { .. } = session.state else {
+                        return Err(AgentError::msg(format!(
+                            "No suspended run for thread_id '{thread_id}'"
+                        )));
+                    };
+
+                    // Unblock drive() — sends the approval responses through the oneshot.
+                    let responses = map_resume_to_responses(resume_entries);
+                    if let Some(tx) = session.resume_tx.take() {
+                        let _ = tx.send(responses);
                     }
+
+                    // Take the live stream that was parked during the interrupt.
+                    let mut parked = match session.parked.take() {
+                        Some(p) => p,
+                        None => {
+                            return Err(AgentError::msg(
+                                "run stream is not available for resume",
+                            ));
+                        }
+                    };
+
+                    // Re-insert a running session so the approval handler can find it if
+                    // the resumed run hits another approval request.
+                    sessions.insert(
+                        thread_id.clone(),
+                        RunSession {
+                            run_id: input.run_id.clone(),
+                            state: SessionState::Running,
+                            created_at: session.created_at,
+                            last_active: std::time::Instant::now(),
+                            resume_tx: None,
+                            parked: None,
+                        },
+                    );
+
+                    // Drain the retained stream into this request's emitter.
+                    return match drain(
+                        &mut parked.stream,
+                        &mut parked.mapper,
+                        &emitter,
+                        &mut parked.interrupt_rx,
+                    )
+                    .await
+                    {
+                        DrainOutcome::Finished => {
+                            sessions.remove(&thread_id);
+                            Ok(RunOutcome::success())
+                        }
+                        DrainOutcome::Interrupted(pending_approvals) => {
+                            // Re-park for a consecutive approval (Req 5.4).
+                            let real_parked = ParkedRun {
+                                stream: parked.stream,
+                                mapper: parked.mapper,
+                                interrupt_rx: parked.interrupt_rx,
+                            };
+                            sessions.update_parked(&thread_id, real_parked);
+                            let interrupts = pending_to_interrupts(pending_approvals);
+                            Ok(RunOutcome::Interrupt(interrupts))
+                        }
+                        DrainOutcome::Failed(msg) => {
+                            sessions.remove(&thread_id);
+                            Err(AgentError::msg(msg))
+                        }
+                    };
                 }
             }
 
@@ -169,8 +340,8 @@ impl ag_ui_server::Agent for ArloBridge {
             // Start the run stream
             let mut stream = run_stream(&agent, arlo_input, &config);
 
-            // Register a placeholder session so the approval handler can find it
-            let task_handle = tokio::spawn(async {}); // replaced below
+            // Register a placeholder session so the approval handler can find it.
+            // `parked` is None until/unless the run is interrupted.
             sessions.insert(
                 thread_id.clone(),
                 RunSession {
@@ -179,87 +350,31 @@ impl ag_ui_server::Agent for ArloBridge {
                     created_at: std::time::Instant::now(),
                     last_active: std::time::Instant::now(),
                     resume_tx: None,
-                    task_handle,
+                    parked: None,
                 },
             );
 
-            // Consume the stream, map events, emit via the EventEmitter
+            // Drain the stream into the emitter.
             let mut mapper = EventMapper::new();
-
-            loop {
-                tokio::select! {
-                    event = stream.next() => {
-                        match event {
-                            Some(run_event) => {
-                                let ag_events = mapper.map_event(run_event);
-                                for ev in ag_events {
-                                    // Check for terminal events — we handle them specially
-                                    match &ev {
-                                        Event::RunFinished(finished) => {
-                                            // If it's an interrupt, return Interrupt outcome
-                                            // (the pipeline wraps it in RUN_FINISHED for us)
-                                            match &finished.outcome {
-                                                Some(RunFinishedOutcome::Interrupt { interrupts }) => {
-                                                    return Ok(RunOutcome::Interrupt(interrupts.clone()));
-                                                }
-                                                _ => {
-                                                    // Success — pipeline emits RUN_FINISHED
-                                                    sessions.remove(&thread_id);
-                                                    return Ok(RunOutcome::success());
-                                                }
-                                            }
-                                        }
-                                        Event::RunError(e) => {
-                                            sessions.remove(&thread_id);
-                                            return Err(AgentError::msg(e.message.clone()));
-                                        }
-                                        _ => {
-                                            // Non-terminal: emit through the emitter
-                                            if emitter.emit(ev).await.is_err() {
-                                                // Client disconnected
-                                                sessions.remove(&thread_id);
-                                                return Err(AgentError::ClientDisconnected);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                // Stream ended without a terminal event (shouldn't happen,
-                                // but handle gracefully)
-                                let flush = mapper.finish();
-                                for ev in flush {
-                                    let _ = emitter.emit(ev).await;
-                                }
-                                sessions.remove(&thread_id);
-                                return Ok(RunOutcome::success());
-                            }
-                        }
-                    }
-                    pending = interrupt_rx.recv() => {
-                        // The approval handler signaled an interrupt
-                        if let Some(pending_approvals) = pending {
-                            // Flush open text messages
-                            let flush = mapper.finish();
-                            for ev in flush {
-                                let _ = emitter.emit(ev).await;
-                            }
-                            let interrupts: Vec<Interrupt> = pending_approvals
-                                .into_iter()
-                                .map(|p| Interrupt {
-                                    id: p.request_id,
-                                    reason: format!("Tool '{}' requires approval", p.tool_name),
-                                    message: None,
-                                    tool_call_id: None,
-                                    response_schema: None,
-                                    expires_at: None,
-                                    metadata: None,
-                                })
-                                .collect();
-                            // Don't remove session — it stays alive for resume
-                            return Ok(RunOutcome::Interrupt(interrupts));
-                        }
-                    }
+            match drain(&mut stream, &mut mapper, &emitter, &mut interrupt_rx).await {
+                DrainOutcome::Finished => {
+                    sessions.remove(&thread_id);
+                    Ok(RunOutcome::success())
+                }
+                DrainOutcome::Interrupted(pending_approvals) => {
+                    // Park the live stream so the resume path can continue it.
+                    let real_parked = ParkedRun {
+                        stream,
+                        mapper,
+                        interrupt_rx,
+                    };
+                    sessions.update_parked(&thread_id, real_parked);
+                    let interrupts = pending_to_interrupts(pending_approvals);
+                    Ok(RunOutcome::Interrupt(interrupts))
+                }
+                DrainOutcome::Failed(msg) => {
+                    sessions.remove(&thread_id);
+                    Err(AgentError::msg(msg))
                 }
             }
         }
@@ -274,6 +389,8 @@ impl ag_ui_server::Agent for ArloBridge {
 pub struct EventMapper {
     /// The message_id of the currently-open text message, if any.
     open_message_id: Option<String>,
+    /// The step_name of the currently-open step, if any.
+    open_step: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -281,6 +398,7 @@ impl EventMapper {
     pub fn new() -> Self {
         Self {
             open_message_id: None,
+            open_step: None,
         }
     }
 
@@ -290,10 +408,12 @@ impl EventMapper {
             RunEvent::StreamChunk(chunk) => self.map_stream_chunk(chunk),
             RunEvent::TurnStart { turn, .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::StepStarted(StepStartedEvent {
                     base: BaseEvent::default(),
                     step_name: format!("turn-{turn}"),
                 }));
+                self.open_step = Some(format!("turn-{turn}"));
                 out
             }
             RunEvent::ToolStart { .. } => {
@@ -301,8 +421,25 @@ impl EventMapper {
                 // is emitted from the streaming ToolUseStart chunk instead.
                 self.close_text_message()
             }
-            RunEvent::ToolEnd { id, .. } => {
+            RunEvent::ToolEnd { id, output, is_error, .. } => {
                 let mut out = self.close_text_message();
+                // ponytail: is_error folded into the content string rather than adding a
+                // field. ToolCallResultEvent has no error flag, and the UI only needs to
+                // show that it failed.
+                out.push(Event::ToolCallResult(ToolCallResultEvent {
+                    base: BaseEvent::default(),
+                    message_id: Uuid::new_v4().to_string(),
+                    tool_call_id: id.clone(),
+                    content: if is_error {
+                        format!("Error: {output}")
+                    } else {
+                        output
+                    },
+                    role: Some(ToolResultRole::Tool),
+                }));
+                // ponytail: no truncation. Arlo already compacts tool results before they
+                // reach the model; this is the raw text for the human. Cap it if a real
+                // deployment starts pushing large outputs to browsers.
                 out.push(Event::ToolCallEnd(ToolCallEndEvent {
                     base: BaseEvent::default(),
                     tool_call_id: id,
@@ -311,6 +448,7 @@ impl EventMapper {
             }
             RunEvent::AgentEnd { .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::RunFinished(RunFinishedEvent {
                     base: BaseEvent::default(),
                     thread_id: String::new(),
@@ -322,18 +460,8 @@ impl EventMapper {
             }
             RunEvent::Interruption { pending } => {
                 let mut out = self.close_text_message();
-                let interrupts = pending
-                    .into_iter()
-                    .map(|p| Interrupt {
-                        id: p.request_id,
-                        reason: format!("Tool '{}' requires approval", p.tool_name),
-                        message: None,
-                        tool_call_id: None,
-                        response_schema: None,
-                        expires_at: None,
-                        metadata: None,
-                    })
-                    .collect();
+                out.extend(self.close_step());
+                let interrupts = pending_to_interrupts(pending);
                 out.push(Event::RunFinished(RunFinishedEvent {
                     base: BaseEvent::default(),
                     thread_id: String::new(),
@@ -345,6 +473,7 @@ impl EventMapper {
             }
             RunEvent::MaxTurns { .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::RunFinished(RunFinishedEvent {
                     base: BaseEvent::default(),
                     thread_id: String::new(),
@@ -356,6 +485,7 @@ impl EventMapper {
             }
             RunEvent::Error { error } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
                     message: error,
@@ -365,6 +495,7 @@ impl EventMapper {
             }
             RunEvent::Aborted { reason } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
                     message: reason,
@@ -374,6 +505,7 @@ impl EventMapper {
             }
             RunEvent::GuardrailTripped { name, reason } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
                     message: format!("Guardrail '{name}': {reason}"),
@@ -386,9 +518,11 @@ impl EventMapper {
         }
     }
 
-    /// Call when the stream ends to flush any open text message.
+    /// Call when the stream ends to flush any open text message and step.
     pub fn finish(&mut self) -> Vec<Event> {
-        self.close_text_message()
+        let mut out = self.close_text_message();
+        out.extend(self.close_step());
+        out
     }
 
     fn map_stream_chunk(&mut self, chunk: StreamChunk) -> Vec<Event> {
@@ -417,12 +551,9 @@ impl EventMapper {
                 out
             }
             StreamChunk::ThinkingDelta { text: _ } => {
-                // Map to a step-started event as a lightweight reasoning signal.
+                // ThinkingDelta has no AG-UI equivalent in this demo.
                 // ponytail: full REASONING_* lifecycle deferred until needed.
-                vec![Event::StepStarted(StepStartedEvent {
-                    base: BaseEvent::default(),
-                    step_name: "thinking".to_string(),
-                })]
+                Vec::new()
             }
             StreamChunk::ToolUseStart { id, name } => {
                 let mut out = self.close_text_message();
@@ -453,6 +584,17 @@ impl EventMapper {
             Some(id) => vec![Event::TextMessageEnd(TextMessageEndEvent {
                 base: BaseEvent::default(),
                 message_id: id,
+            })],
+            None => Vec::new(),
+        }
+    }
+
+    /// If a step is open, emit STEP_FINISHED and clear state.
+    fn close_step(&mut self) -> Vec<Event> {
+        match self.open_step.take() {
+            Some(name) => vec![Event::StepFinished(StepFinishedEvent {
+                base: BaseEvent::default(),
+                step_name: name,
             })],
             None => Vec::new(),
         }
@@ -526,8 +668,61 @@ mod tests {
             output: "ok".into(),
             is_error: false,
         });
-        assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], Event::ToolCallEnd(_)));
+        // Expect [ToolCallResult, ToolCallEnd]
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            Event::ToolCallResult(e) => {
+                assert_eq!(e.tool_call_id, "t1");
+                assert_eq!(e.content, "ok");
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
+        match &out[1] {
+            Event::ToolCallEnd(e) => assert_eq!(e.tool_call_id, "t1"),
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_end_is_error_prefixes_content() {
+        let mut m = EventMapper::new();
+        let out = m.map_event(RunEvent::ToolEnd {
+            id: "t1".into(),
+            name: "shell".into(),
+            output: "permission denied".into(),
+            is_error: true,
+        });
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            Event::ToolCallResult(e) => {
+                assert_eq!(e.tool_call_id, "t1");
+                assert!(
+                    e.content.starts_with("Error: "),
+                    "expected content to start with 'Error: ', got {:?}",
+                    e.content
+                );
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
+        assert!(matches!(out[1], Event::ToolCallEnd(_)));
+    }
+
+    #[test]
+    fn tool_end_success_no_error_prefix() {
+        let mut m = EventMapper::new();
+        let out = m.map_event(RunEvent::ToolEnd {
+            id: "t1".into(),
+            name: "shell".into(),
+            output: "hello world".into(),
+            is_error: false,
+        });
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            Event::ToolCallResult(e) => {
+                assert_eq!(e.content, "hello world");
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
     }
 
     #[test]
@@ -623,6 +818,89 @@ mod tests {
         }
     }
 
+    // Task 6.3 — step lifecycle tests
+
+    #[test]
+    fn turn_start_emits_step_finished_before_new_step_started() {
+        let mut m = EventMapper::new();
+
+        // First TurnStart opens a step.
+        let out1 = m.map_event(RunEvent::TurnStart {
+            turn: 1,
+            agent: "main".into(),
+        });
+        // Should emit only STEP_STARTED("turn-1"); no prior step to close.
+        assert_eq!(out1.len(), 1);
+        match &out1[0] {
+            Event::StepStarted(e) => assert_eq!(e.step_name, "turn-1"),
+            other => panic!("expected StepStarted, got {other:?}"),
+        }
+
+        // Second TurnStart must close the open step before opening the new one.
+        let out2 = m.map_event(RunEvent::TurnStart {
+            turn: 2,
+            agent: "main".into(),
+        });
+        // STEP_FINISHED("turn-1") + STEP_STARTED("turn-2")
+        assert_eq!(out2.len(), 2, "expected [STEP_FINISHED, STEP_STARTED], got {out2:?}");
+        match &out2[0] {
+            Event::StepFinished(e) => assert_eq!(e.step_name, "turn-1"),
+            other => panic!("expected StepFinished('turn-1'), got {other:?}"),
+        }
+        match &out2[1] {
+            Event::StepStarted(e) => assert_eq!(e.step_name, "turn-2"),
+            other => panic!("expected StepStarted('turn-2'), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_event_closes_step() {
+        let mut m = EventMapper::new();
+
+        // Open a step via TurnStart.
+        m.map_event(RunEvent::TurnStart {
+            turn: 1,
+            agent: "main".into(),
+        });
+
+        // AgentEnd must close the open step before RUN_FINISHED.
+        let out = m.map_event(RunEvent::AgentEnd {
+            agent: "main".into(),
+            output: "done".into(),
+            usage: Default::default(),
+        });
+
+        // Expected: [STEP_FINISHED("turn-1"), RUN_FINISHED]
+        assert_eq!(out.len(), 2, "expected [STEP_FINISHED, RUN_FINISHED], got {out:?}");
+        match &out[0] {
+            Event::StepFinished(e) => assert_eq!(e.step_name, "turn-1"),
+            other => panic!("expected StepFinished('turn-1'), got {other:?}"),
+        }
+        assert!(
+            matches!(out[1], Event::RunFinished(_)),
+            "expected RunFinished, got {:?}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn finish_closes_open_step() {
+        let mut m = EventMapper::new();
+
+        // Open a step via TurnStart.
+        m.map_event(RunEvent::TurnStart {
+            turn: 1,
+            agent: "main".into(),
+        });
+
+        // finish() must close the open step.
+        let out = m.finish();
+        assert!(
+            out.iter().any(|e| matches!(e, Event::StepFinished(s) if s.step_name == "turn-1")),
+            "expected STEP_FINISHED('turn-1') in finish() output, got {out:?}"
+        );
+    }
+
     #[test]
     fn finish_closes_open_text_message() {
         let mut m = EventMapper::new();
@@ -642,13 +920,12 @@ mod tests {
     }
 
     #[test]
-    fn thinking_delta_maps_to_step_started() {
+    fn thinking_delta_produces_no_events() {
         let mut m = EventMapper::new();
         let out = m.map_event(RunEvent::StreamChunk(StreamChunk::ThinkingDelta {
             text: "hmm".into(),
         }));
-        assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], Event::StepStarted(_)));
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -1014,7 +1291,444 @@ mod tests {
         }
     }
 
+    // Feature: ag-ui-server, Property 5: No open step at terminal event
+    // **Validates: Requirements 9.1, 9.2, 9.3, 9.4**
+    //
+    // For any valid run sequence that contains at least one TurnStart followed by
+    // a terminal event, when the terminal event is emitted the step lifecycle is
+    // closed: every STEP_STARTED that appears before the terminal event has a
+    // matching STEP_FINISHED before it.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_no_open_step_at_terminal(
+            turn_count in 1u32..5u32,
+            terminal in arb_terminal_event(),
+        ) {
+            let mut mapper = EventMapper::new();
+            let mut all_output: Vec<Event> = Vec::new();
+
+            // Emit a sequence of TurnStart events to open and close steps.
+            for t in 1..=turn_count {
+                all_output.extend(mapper.map_event(RunEvent::TurnStart {
+                    turn: t,
+                    agent: "main".into(),
+                }));
+            }
+            // Emit terminal event — must close the last open step.
+            all_output.extend(mapper.map_event(terminal));
+            // finish() is also called as a belt-and-suspenders flush.
+            all_output.extend(mapper.finish());
+
+            // Find the position of the terminal AG-UI event.
+            let terminal_pos = all_output
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| matches!(e, Event::RunFinished(_) | Event::RunError(_)))
+                .map(|(i, _)| i)
+                .next_back()
+                .expect("terminal event must exist");
+
+            // Examine events before the terminal event.
+            let events_before_terminal = &all_output[..terminal_pos];
+            let step_starts: Vec<_> = events_before_terminal
+                .iter()
+                .filter_map(|e| {
+                    if let Event::StepStarted(s) = e {
+                        Some(s.step_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let step_ends: Vec<_> = events_before_terminal
+                .iter()
+                .filter_map(|e| {
+                    if let Event::StepFinished(s) = e {
+                        Some(s.step_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Every step that was started must have been finished before the terminal.
+            prop_assert_eq!(
+                step_starts.len(),
+                step_ends.len(),
+                "Steps opened: {:?}, steps closed: {:?}",
+                step_starts,
+                step_ends,
+            );
+        }
+    }
+
+    // -- drain / resume integration tests -------------------------------------
+
+    /// Helper: build a minimal ArloBridge whose base_config will never be used
+    /// for a real model call (resume path never calls the model).
+    fn make_bridge(sessions: Arc<super::super::session::SessionStore>) -> ArloBridge {
+        use agent_core::agent::Instructions;
+        use agent_core::config::RunConfig;
+        use agent_core::error::ModelError;
+        use agent_core::model::{Model, ModelProvider};
+
+        struct NullProvider;
+
+        #[async_trait::async_trait]
+        impl ModelProvider for NullProvider {
+            async fn resolve(
+                &self,
+                _: &str,
+            ) -> Result<Arc<dyn Model>, ModelError> {
+                Err(ModelError::Connection("null provider — tests only".into()))
+            }
+            fn available_models(&self) -> Vec<String> {
+                vec![]
+            }
+        }
+
+        let agent = agent_core::agent::Agent::builder("test")
+            .instructions(Instructions::Static(String::new()))
+            .build();
+
+        let base_config = RunConfig::builder(Arc::new(NullProvider), "null-model").build();
+
+        ArloBridge::new(agent, base_config, sessions)
+    }
+
+    /// Build a minimal `RunAgentInput` for new-run or resume calls.
+    fn make_input(
+        thread_id: &str,
+        run_id: &str,
+        resume: Option<Vec<ag_ui_protocol::ResumeEntry>>,
+    ) -> RunAgentInput {
+        RunAgentInput {
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+            parent_run_id: None,
+            state: serde_json::Value::Null,
+            messages: vec![],
+            tools: vec![],
+            context: vec![],
+            forwarded_props: serde_json::Value::Null,
+            resume,
+        }
+    }
+
+    // Task 3.3 — Test 1:
+    // Drain over a terminal stream returns Finished; the AG-UI event stream
+    // ends with RunFinished. Tested end-to-end via the resume path so the
+    // EventEmitter is constructed by the ag_ui_server pipeline.
+    #[tokio::test]
+    async fn drain_over_terminal_stream_returns_finished() {
+        use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use agent_core::event::RunEvent;
+        use ag_ui_server::run_agent;
+        use futures::StreamExt;
+
+        let sessions = Arc::new(super::super::session::SessionStore::new());
+        let bridge = Arc::new(make_bridge(Arc::clone(&sessions)));
+
+        // Pre-build a parked stream that emits a single terminal RunEvent.
+        let parked_stream: super::super::session::RunStream =
+            Box::pin(futures::stream::iter(vec![RunEvent::AgentEnd {
+                agent: "test".into(),
+                output: "done".into(),
+                usage: Default::default(),
+            }]));
+
+        let (interrupt_tx, interrupt_rx) = tokio::sync::mpsc::channel(1);
+        // interrupt_tx is intentionally dropped immediately — no interrupt will fire.
+        drop(interrupt_tx);
+
+        let parked = super::super::session::ParkedRun {
+            stream: parked_stream,
+            mapper: EventMapper::new(),
+            interrupt_rx,
+        };
+
+        // Set up a fully-interrupted session with the parked run.
+        let (resume_tx, _resume_rx) = tokio::sync::oneshot::channel();
+        sessions.insert(
+            "t-finish".into(),
+            super::super::session::RunSession {
+                run_id: "r1".into(),
+                state: super::super::session::SessionState::Interrupted {
+                    pending: vec![],
+                },
+                created_at: std::time::Instant::now(),
+                last_active: std::time::Instant::now(),
+                resume_tx: Some(resume_tx),
+                parked: Some(parked),
+            },
+        );
+
+        // Resume the parked run — drain should drain the stream to Finished.
+        let resume_entry = ResumeEntry {
+            interrupt_id: "req-1".into(),
+            status: ResumeStatus::Resolved,
+            payload: None,
+        };
+        let input = make_input("t-finish", "r2", Some(vec![resume_entry]));
+        let events: Vec<Event> = run_agent(bridge, input).collect().await;
+
+        // The stream must end with RunFinished (success), not RunError.
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(
+                last,
+                Event::RunFinished(e)
+                if e.outcome == Some(ag_ui_protocol::RunFinishedOutcome::Success)
+            ),
+            "expected RunFinished(Success), got {last:?}"
+        );
+
+        // Session should be cleaned up after a clean finish.
+        assert_eq!(sessions.len(), 0, "session should be removed after drain finishes");
+    }
+
+    // Task 3.3 — Test 1b:
+    // Drain over a stream that triggers an interrupt returns Interrupted;
+    // the AG-UI outcome is RunFinished(Interrupt) and the session is re-parked.
+    #[tokio::test]
+    async fn drain_over_interrupt_stream_returns_interrupted() {
+        use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use agent_core::event::RunEvent;
+        use agent_core::next_step::PendingApproval;
+        use ag_ui_server::run_agent;
+        use futures::StreamExt;
+
+        let sessions = Arc::new(super::super::session::SessionStore::new());
+        let bridge = Arc::new(make_bridge(Arc::clone(&sessions)));
+
+        // The interrupt channel: send a pending approval to trigger an interrupt.
+        let (interrupt_tx, interrupt_rx) = tokio::sync::mpsc::channel::<Vec<PendingApproval>>(1);
+
+        // The parked stream blocks forever — the interrupt arrives on interrupt_rx.
+        let parked_stream: super::super::session::RunStream =
+            Box::pin(futures::stream::pending::<RunEvent>());
+
+        let parked = super::super::session::ParkedRun {
+            stream: parked_stream,
+            mapper: EventMapper::new(),
+            interrupt_rx,
+        };
+
+        let (resume_tx, _resume_rx) = tokio::sync::oneshot::channel();
+        sessions.insert(
+            "t-interrupt".into(),
+            super::super::session::RunSession {
+                run_id: "r1".into(),
+                state: super::super::session::SessionState::Interrupted {
+                    pending: vec![],
+                },
+                created_at: std::time::Instant::now(),
+                last_active: std::time::Instant::now(),
+                resume_tx: Some(resume_tx),
+                parked: Some(parked),
+            },
+        );
+
+        // Spawn a task to send the interrupt signal after a short delay so the
+        // drain loop is already running by the time it arrives.
+        let approval = PendingApproval {
+            tool_name: "shell".into(),
+            tool_input: serde_json::json!({"cmd": "ls"}),
+            request_id: "approval-tc-1".into(),
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = interrupt_tx.send(vec![approval]).await;
+        });
+
+        let resume_entry = ResumeEntry {
+            interrupt_id: "req-1".into(),
+            status: ResumeStatus::Resolved,
+            payload: None,
+        };
+        let input = make_input("t-interrupt", "r2", Some(vec![resume_entry]));
+        let events: Vec<Event> = run_agent(bridge, input).collect().await;
+
+        // The stream should end with RunFinished(Interrupt { .. }).
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(
+                last,
+                Event::RunFinished(e)
+                if matches!(&e.outcome, Some(ag_ui_protocol::RunFinishedOutcome::Interrupt { interrupts }) if !interrupts.is_empty())
+            ),
+            "expected RunFinished(Interrupt), got {last:?}"
+        );
+
+        // The session should be re-parked (kept alive for the next resume).
+        assert_eq!(sessions.len(), 1, "session should remain for re-park");
+    }
+
+    // Task 3.3 — Test 2:
+    // Resume with a thread_id not in the store returns an error containing
+    // "No suspended run".
+    #[tokio::test]
+    async fn resume_unknown_thread_returns_error() {
+        use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use ag_ui_server::run_agent;
+        use futures::StreamExt;
+
+        let sessions = Arc::new(super::super::session::SessionStore::new());
+        let bridge = Arc::new(make_bridge(sessions));
+
+        let resume_entry = ResumeEntry {
+            interrupt_id: "req-x".into(),
+            status: ResumeStatus::Resolved,
+            payload: None,
+        };
+        let input = make_input("unknown-thread", "r1", Some(vec![resume_entry]));
+        let events: Vec<Event> = run_agent(bridge, input).collect().await;
+
+        // The pipeline wraps agent errors as RunError events.
+        let last = events.last().expect("at least one event");
+        match last {
+            Event::RunError(e) => {
+                assert!(
+                    e.message.contains("No suspended run"),
+                    "expected 'No suspended run' in error message, got: {:?}",
+                    e.message
+                );
+            }
+            other => panic!("expected RunError, got {other:?}"),
+        }
+    }
+
+    // Task 3.3 — Test 3:
+    // Events produced by the parked stream after resume are delivered to the
+    // second emitter (the resume request's event stream), not lost.
+    //
+    // We verify this by:
+    //  1. Manually seeding a session with a parked stream that emits
+    //     [TextDelta("after-resume"), AgentEnd]
+    //  2. Calling the bridge's resume path via run_agent
+    //  3. Asserting the collected event stream contains the text content and
+    //     ends with RunFinished (i.e., events reach the second emitter)
+    #[tokio::test]
+    async fn park_then_resume_delivers_to_second_emitter() {
+        use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use agent_core::event::RunEvent;
+        use agent_core::stream::StreamChunk;
+        use ag_ui_server::run_agent;
+        use futures::StreamExt;
+
+        let sessions = Arc::new(super::super::session::SessionStore::new());
+        let bridge = Arc::new(make_bridge(Arc::clone(&sessions)));
+
+        // Build a stream that emits a text delta then terminates.
+        let parked_events = vec![
+            RunEvent::StreamChunk(StreamChunk::TextDelta {
+                text: "after-resume".into(),
+            }),
+            RunEvent::AgentEnd {
+                agent: "test".into(),
+                output: "after-resume".into(),
+                usage: Default::default(),
+            },
+        ];
+        let parked_stream: super::super::session::RunStream =
+            Box::pin(futures::stream::iter(parked_events));
+
+        let (interrupt_tx, interrupt_rx) = tokio::sync::mpsc::channel(1);
+        // No interrupt will fire — drop the sender.
+        drop(interrupt_tx);
+
+        let parked = super::super::session::ParkedRun {
+            stream: parked_stream,
+            mapper: EventMapper::new(),
+            interrupt_rx,
+        };
+
+        // Seed the session store as if the first HTTP request already parked here.
+        let (resume_tx, _resume_rx) = tokio::sync::oneshot::channel();
+        sessions.insert(
+            "t-resume".into(),
+            super::super::session::RunSession {
+                run_id: "r1".into(),
+                state: super::super::session::SessionState::Interrupted {
+                    pending: vec![],
+                },
+                created_at: std::time::Instant::now(),
+                last_active: std::time::Instant::now(),
+                resume_tx: Some(resume_tx),
+                parked: Some(parked),
+            },
+        );
+
+        // Second HTTP request: resume. This is the "second emitter".
+        let resume_entry = ResumeEntry {
+            interrupt_id: "req-1".into(),
+            status: ResumeStatus::Resolved,
+            payload: None,
+        };
+        let input = make_input("t-resume", "r2", Some(vec![resume_entry]));
+        let events: Vec<Event> = run_agent(bridge, input).collect().await;
+
+        // The text content "after-resume" must appear in the second emitter's stream.
+        let has_text_content = events.iter().any(|e| {
+            matches!(e, Event::TextMessageContent(c) if c.delta == "after-resume")
+        });
+        assert!(
+            has_text_content,
+            "expected 'after-resume' text content in resume stream; events: {events:?}"
+        );
+
+        // Stream must end with RunFinished (not RunError or missing terminal).
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(last, Event::RunFinished(_)),
+            "expected RunFinished, got {last:?}"
+        );
+
+        // Session cleaned up after successful drain.
+        assert_eq!(sessions.len(), 0, "session should be removed after clean drain");
+    }
+
     // -- ArloBridge tests ------------------------------------------------------
+
+    // Task 4.2 — interrupt payload fields
+    #[test]
+    fn interrupt_fields_from_pending_approval() {
+        let pending = vec![PendingApproval {
+            tool_name: "shell".into(),
+            tool_input: serde_json::json!({"command": "ls -la"}),
+            request_id: "approval-tc_7".into(),
+        }];
+        let interrupts = pending_to_interrupts(pending);
+        assert_eq!(interrupts.len(), 1);
+        let i = &interrupts[0];
+
+        // id retains the full prefix
+        assert_eq!(i.id, "approval-tc_7");
+
+        // reason is "tool_call"
+        assert_eq!(i.reason, "tool_call");
+
+        // tool_call_id strips the prefix
+        assert_eq!(i.tool_call_id, Some("tc_7".to_string()));
+
+        // message is Some and non-empty
+        assert!(i.message.is_some());
+        assert!(!i.message.as_ref().unwrap().is_empty());
+
+        // metadata carries toolName and toolInput
+        let metadata = i.metadata.as_ref().expect("metadata must be present");
+        assert_eq!(metadata.get("toolName").and_then(|v| v.as_str()), Some("shell"));
+        assert!(metadata.contains_key("toolInput"), "metadata must contain toolInput");
+
+        // expires_at parses as RFC 3339
+        let expires_at = i.expires_at.as_ref().expect("expires_at must be present");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+            "expires_at must be valid RFC 3339: {expires_at}"
+        );
+    }
 
     #[test]
     fn convert_messages_user_text() {

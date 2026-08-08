@@ -8,3 +8,6 @@ openspec
 .claude
 .codex
 docs/superpowers
+.DS_Store
+/.env
+/integration/web/.env

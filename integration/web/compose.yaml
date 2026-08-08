@@ -1,0 +1,33 @@
+services:
+  arlo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["arlo", "--serve", "0.0.0.0:8080", "--model", "${ARLO_MODEL}"]
+    env_file:
+      - .env
+    working_dir: /work
+    read_only: true
+    tmpfs:
+      - /work
+    user: "10001:10001"
+    mem_limit: 2g
+    pids_limit: 256
+    # No ports: — arlo is reachable only on the compose network at http://arlo:8080
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ARLO_URL: http://arlo:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - arlo
+    read_only: true
+    user: "10001:10001"
+
+volumes:
+  cargo-registry:
+  cargo-target:

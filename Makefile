@@ -13,7 +13,7 @@ release:
 
 # Run the CLI
 run:
-	cargo run --bin agent-cli
+	cargo run --bin arlo
 
 # Run all tests
 test:
