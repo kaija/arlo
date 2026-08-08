@@ -169,6 +169,8 @@ pub struct ToolEntry {
     /// The name of the tool.
     #[allow(dead_code)]
     pub name: String,
+    /// The primary input argument (e.g. filename, command) for display.
+    pub input_summary: String,
     /// Current execution status.
     pub status: ToolStatus,
     /// Output produced by the tool (populated on completion).
@@ -722,11 +724,8 @@ impl AppState {
                         style: SpanStyle::Thinking,
                     });
                 }
-                StreamChunk::ToolUseStart { id: _, name } => {
-                    self.output_buffer.push(OutputSpan {
-                        text: format!("⚡ {name}"),
-                        style: SpanStyle::ToolName,
-                    });
+                StreamChunk::ToolUseStart { id: _, name: _ } => {
+                    // Tool lifecycle is surfaced via RunEvent::ToolStart/ToolEnd instead.
                 }
                 StreamChunk::MessageStop { .. } => {
                     // Message finalized — no additional rendering needed
@@ -736,18 +735,32 @@ impl AppState {
                 _ => {}
             },
 
-            RunEvent::TurnStart { turn, .. } => {
+            RunEvent::TurnStart { turn, agent } => {
                 self.current_turn = turn;
                 self.activity = AgentActivity::Responding;
+                self.output_buffer.push(OutputSpan {
+                    text: format!("\n[TurnStart] agent={}\n", agent),
+                    style: SpanStyle::System,
+                });
             }
 
-            RunEvent::ToolStart { id, name } => {
+            RunEvent::ToolStart { id, name, input } => {
+                let primary = extract_primary_arg(&input);
+                let display = match primary {
+                    Some(arg) if !arg.is_empty() => format!("{} {}", name, arg),
+                    _ => name.clone(),
+                };
                 self.activity = AgentActivity::ToolExecuting {
                     tool_name: name.clone(),
                 };
+                self.output_buffer.push(OutputSpan {
+                    text: format!("[ToolStart] {}\n", display),
+                    style: SpanStyle::ToolName,
+                });
                 self.active_tools.push(ToolEntry {
                     id,
                     name,
+                    input_summary: display,
                     status: ToolStatus::Executing,
                     output: None,
                     is_error: false,
@@ -760,6 +773,12 @@ impl AppState {
                 output,
                 is_error,
             } => {
+                let input_summary = self
+                    .active_tools
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.input_summary.clone())
+                    .unwrap_or_default();
                 if let Some(entry) = self.active_tools.iter_mut().find(|t| t.id == id) {
                     entry.status = ToolStatus::Completed;
                     entry.output = Some(output);
@@ -767,6 +786,15 @@ impl AppState {
                 }
                 // Revert to Responding after tool completes (model will continue)
                 self.activity = AgentActivity::Responding;
+                let check = if is_error { "✗" } else { "✓" };
+                self.output_buffer.push(OutputSpan {
+                    text: format!("[ToolEnd] {} {}\n", input_summary, check),
+                    style: if is_error {
+                        SpanStyle::Error
+                    } else {
+                        SpanStyle::System
+                    },
+                });
             }
 
             RunEvent::Interruption { pending } => {
@@ -916,15 +944,15 @@ mod tests {
 
     #[test]
     fn tool_use_start_pushes_tool_name_span() {
+        // ToolUseStart no longer pushes a span — tool lifecycle is surfaced via
+        // RunEvent::ToolStart/ToolEnd instead.
         let mut state = make_state();
         let event = RunEvent::StreamChunk(StreamChunk::ToolUseStart {
             id: "t1".to_string(),
             name: "read_file".to_string(),
         });
         state.update(AppEvent::AgentEvent(event));
-        assert_eq!(state.output_buffer.len(), 1);
-        assert_eq!(state.output_buffer[0].style, SpanStyle::ToolName);
-        assert!(state.output_buffer[0].text.contains("read_file"));
+        assert!(state.output_buffer.is_empty());
     }
 
     #[test]
@@ -944,6 +972,7 @@ mod tests {
         let event = RunEvent::ToolStart {
             id: "t1".to_string(),
             name: "shell".to_string(),
+            input: serde_json::Value::Null,
         };
         state.update(AppEvent::AgentEvent(event));
         assert_eq!(state.active_tools.len(), 1);
@@ -959,6 +988,7 @@ mod tests {
         state.update(AppEvent::AgentEvent(RunEvent::ToolStart {
             id: "t1".to_string(),
             name: "shell".to_string(),
+            input: serde_json::Value::Null,
         }));
         // Then end it
         state.update(AppEvent::AgentEvent(RunEvent::ToolEnd {
@@ -978,6 +1008,7 @@ mod tests {
         state.update(AppEvent::AgentEvent(RunEvent::ToolStart {
             id: "t2".to_string(),
             name: "shell".to_string(),
+            input: serde_json::Value::Null,
         }));
         state.update(AppEvent::AgentEvent(RunEvent::ToolEnd {
             id: "t2".to_string(),
@@ -1010,6 +1041,7 @@ mod tests {
         state.active_tools.push(ToolEntry {
             id: "t1".to_string(),
             name: "shell".to_string(),
+            input_summary: "shell".to_string(),
             status: ToolStatus::Executing,
             output: None,
             is_error: false,
@@ -1092,12 +1124,15 @@ mod tests {
 
     #[test]
     fn turn_start_is_ignored() {
+        // TurnStart now emits a [TurnStart] line to the output buffer.
         let mut state = make_state();
         state.update(AppEvent::AgentEvent(RunEvent::TurnStart {
             turn: 1,
             agent: "main".to_string(),
         }));
-        assert!(state.output_buffer.is_empty());
+        assert_eq!(state.output_buffer.len(), 1);
+        assert!(state.output_buffer[0].text.contains("[TurnStart]"));
+        assert!(state.output_buffer[0].text.contains("agent=main"));
         assert_eq!(state.mode, AppMode::Running);
     }
 
@@ -1417,6 +1452,7 @@ mod property_tests {
             state.update(AppEvent::AgentEvent(RunEvent::ToolStart {
                 id: tool_id.clone(),
                 name: tool_name.clone(),
+                input: serde_json::Value::Null,
             }));
             state.update(AppEvent::AgentEvent(RunEvent::ToolEnd {
                 id: tool_id.clone(),
@@ -1453,6 +1489,7 @@ mod property_tests {
                 state.update(AppEvent::AgentEvent(RunEvent::ToolStart {
                     id: id.clone(),
                     name: name.clone(),
+                    input: serde_json::Value::Null,
                 }));
             }
 

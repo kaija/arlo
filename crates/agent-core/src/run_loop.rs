@@ -292,6 +292,7 @@ async fn drive(
                     RunEvent::ToolStart {
                         id: tu.id.clone(),
                         name: tu.name.clone(),
+                        input: tu.input.clone(),
                     },
                 )
                 .await;

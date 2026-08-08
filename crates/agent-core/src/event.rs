@@ -37,6 +37,8 @@ pub enum RunEvent {
         id: String,
         /// The name of the tool being executed.
         name: String,
+        /// The JSON input arguments passed to the tool.
+        input: serde_json::Value,
     },
 
     /// A tool execution has completed.
