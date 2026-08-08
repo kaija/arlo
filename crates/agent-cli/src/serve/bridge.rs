@@ -124,10 +124,7 @@ fn pending_to_interrupts(pending: Vec<PendingApproval>) -> Vec<Interrupt> {
     pending
         .into_iter()
         .map(|p| {
-            let tool_call_id = p
-                .request_id
-                .strip_prefix("approval-")
-                .map(str::to_string);
+            let tool_call_id = p.request_id.strip_prefix("approval-").map(str::to_string);
             Interrupt {
                 id: p.request_id.clone(),
                 reason: "tool_call".to_string(),
@@ -138,9 +135,7 @@ fn pending_to_interrupts(pending: Vec<PendingApproval>) -> Vec<Interrupt> {
                 )),
                 tool_call_id,
                 response_schema: None,
-                expires_at: Some(
-                    (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
-                ),
+                expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339()),
                 metadata: Some(
                     serde_json::json!({ "toolName": p.tool_name, "toolInput": p.tool_input })
                         .as_object()
@@ -267,9 +262,7 @@ impl ag_ui_server::Agent for ArloBridge {
                     let mut parked = match session.parked.take() {
                         Some(p) => p,
                         None => {
-                            return Err(AgentError::msg(
-                                "run stream is not available for resume",
-                            ));
+                            return Err(AgentError::msg("run stream is not available for resume"));
                         }
                     };
 
@@ -391,6 +384,14 @@ pub struct EventMapper {
     open_message_id: Option<String>,
     /// The step_name of the currently-open step, if any.
     open_step: Option<String>,
+    /// tool_call_ids that got a TOOL_CALL_START but no TOOL_CALL_END yet.
+    ///
+    /// TOOL_CALL_START comes from the model stream; TOOL_CALL_END only comes
+    /// from `ToolEnd` after the tool actually executes. Any run that ends in
+    /// between (approval interrupt, error, max turns, a tool call the run loop
+    /// never executes) would otherwise emit RUN_FINISHED with the call still
+    /// open, which AG-UI clients reject.
+    open_tool_calls: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -399,6 +400,7 @@ impl EventMapper {
         Self {
             open_message_id: None,
             open_step: None,
+            open_tool_calls: Vec::new(),
         }
     }
 
@@ -408,6 +410,7 @@ impl EventMapper {
             RunEvent::StreamChunk(chunk) => self.map_stream_chunk(chunk),
             RunEvent::TurnStart { turn, .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::StepStarted(StepStartedEvent {
                     base: BaseEvent::default(),
@@ -421,7 +424,12 @@ impl EventMapper {
                 // is emitted from the streaming ToolUseStart chunk instead.
                 self.close_text_message()
             }
-            RunEvent::ToolEnd { id, output, is_error, .. } => {
+            RunEvent::ToolEnd {
+                id,
+                output,
+                is_error,
+                ..
+            } => {
                 let mut out = self.close_text_message();
                 // ponytail: is_error folded into the content string rather than adding a
                 // field. ToolCallResultEvent has no error flag, and the UI only needs to
@@ -440,14 +448,21 @@ impl EventMapper {
                 // ponytail: no truncation. Arlo already compacts tool results before they
                 // reach the model; this is the raw text for the human. Cap it if a real
                 // deployment starts pushing large outputs to browsers.
-                out.push(Event::ToolCallEnd(ToolCallEndEvent {
-                    base: BaseEvent::default(),
-                    tool_call_id: id,
-                }));
+                //
+                // Only close a call that is still open: an interrupt already closed it in
+                // the previous run, and a second END would be rejected as unmatched.
+                if let Some(pos) = self.open_tool_calls.iter().position(|t| *t == id) {
+                    self.open_tool_calls.remove(pos);
+                    out.push(Event::ToolCallEnd(ToolCallEndEvent {
+                        base: BaseEvent::default(),
+                        tool_call_id: id,
+                    }));
+                }
                 out
             }
             RunEvent::AgentEnd { .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::RunFinished(RunFinishedEvent {
                     base: BaseEvent::default(),
@@ -460,6 +475,7 @@ impl EventMapper {
             }
             RunEvent::Interruption { pending } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 let interrupts = pending_to_interrupts(pending);
                 out.push(Event::RunFinished(RunFinishedEvent {
@@ -473,6 +489,7 @@ impl EventMapper {
             }
             RunEvent::MaxTurns { .. } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::RunFinished(RunFinishedEvent {
                     base: BaseEvent::default(),
@@ -485,6 +502,7 @@ impl EventMapper {
             }
             RunEvent::Error { error } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
@@ -495,6 +513,7 @@ impl EventMapper {
             }
             RunEvent::Aborted { reason } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
@@ -505,6 +524,7 @@ impl EventMapper {
             }
             RunEvent::GuardrailTripped { name, reason } => {
                 let mut out = self.close_text_message();
+                out.extend(self.close_tool_calls());
                 out.extend(self.close_step());
                 out.push(Event::RunError(RunErrorEvent {
                     base: BaseEvent::default(),
@@ -518,9 +538,10 @@ impl EventMapper {
         }
     }
 
-    /// Call when the stream ends to flush any open text message and step.
+    /// Call when the stream ends to flush any open text message, tool call and step.
     pub fn finish(&mut self) -> Vec<Event> {
         let mut out = self.close_text_message();
+        out.extend(self.close_tool_calls());
         out.extend(self.close_step());
         out
     }
@@ -557,6 +578,7 @@ impl EventMapper {
             }
             StreamChunk::ToolUseStart { id, name } => {
                 let mut out = self.close_text_message();
+                self.open_tool_calls.push(id.clone());
                 out.push(Event::ToolCallStart(ToolCallStartEvent {
                     base: BaseEvent::default(),
                     tool_call_id: id,
@@ -587,6 +609,22 @@ impl EventMapper {
             })],
             None => Vec::new(),
         }
+    }
+
+    /// Close every tool call that was started but never ended.
+    ///
+    /// AG-UI rejects RUN_FINISHED while a tool call is still active, so every
+    /// terminal event closes the stragglers first.
+    fn close_tool_calls(&mut self) -> Vec<Event> {
+        self.open_tool_calls
+            .drain(..)
+            .map(|id| {
+                Event::ToolCallEnd(ToolCallEndEvent {
+                    base: BaseEvent::default(),
+                    tool_call_id: id,
+                })
+            })
+            .collect()
     }
 
     /// If a step is open, emit STEP_FINISHED and clear state.
@@ -662,6 +700,10 @@ mod tests {
     #[test]
     fn tool_end_maps_to_tool_call_end() {
         let mut m = EventMapper::new();
+        m.map_event(RunEvent::StreamChunk(StreamChunk::ToolUseStart {
+            id: "t1".into(),
+            name: "shell".into(),
+        }));
         let out = m.map_event(RunEvent::ToolEnd {
             id: "t1".into(),
             name: "shell".into(),
@@ -686,6 +728,10 @@ mod tests {
     #[test]
     fn tool_end_is_error_prefixes_content() {
         let mut m = EventMapper::new();
+        m.map_event(RunEvent::StreamChunk(StreamChunk::ToolUseStart {
+            id: "t1".into(),
+            name: "shell".into(),
+        }));
         let out = m.map_event(RunEvent::ToolEnd {
             id: "t1".into(),
             name: "shell".into(),
@@ -710,6 +756,10 @@ mod tests {
     #[test]
     fn tool_end_success_no_error_prefix() {
         let mut m = EventMapper::new();
+        m.map_event(RunEvent::StreamChunk(StreamChunk::ToolUseStart {
+            id: "t1".into(),
+            name: "shell".into(),
+        }));
         let out = m.map_event(RunEvent::ToolEnd {
             id: "t1".into(),
             name: "shell".into(),
@@ -763,6 +813,42 @@ mod tests {
             },
             other => panic!("expected RunFinished, got {other:?}"),
         }
+    }
+
+    // A tool call that never executes (interrupt, error, abandoned call) must still
+    // be closed before the terminal event — AG-UI clients reject RUN_FINISHED while
+    // a tool call is active. On resume the late ToolEnd must not close it twice.
+    #[test]
+    fn unexecuted_tool_call_is_closed_before_terminal_event() {
+        let mut m = EventMapper::new();
+        m.map_event(RunEvent::StreamChunk(StreamChunk::ToolUseStart {
+            id: "t1".into(),
+            name: "shell".into(),
+        }));
+
+        let out = m.map_event(RunEvent::Interruption {
+            pending: vec![PendingApproval {
+                tool_name: "shell".into(),
+                tool_input: serde_json::json!({"cmd": "ls"}),
+                request_id: "approval-t1".into(),
+            }],
+        });
+        assert!(
+            matches!(&out[0], Event::ToolCallEnd(e) if e.tool_call_id == "t1"),
+            "expected ToolCallEnd(t1) first, got {:?}",
+            out
+        );
+        assert!(matches!(out[1], Event::RunFinished(_)));
+
+        // Resume: the result arrives, but the call was already closed.
+        let out = m.map_event(RunEvent::ToolEnd {
+            id: "t1".into(),
+            name: "shell".into(),
+            output: "ok".into(),
+            is_error: false,
+        });
+        assert_eq!(out.len(), 1, "expected result only, got {out:?}");
+        assert!(matches!(out[0], Event::ToolCallResult(_)));
     }
 
     #[test]
@@ -842,7 +928,11 @@ mod tests {
             agent: "main".into(),
         });
         // STEP_FINISHED("turn-1") + STEP_STARTED("turn-2")
-        assert_eq!(out2.len(), 2, "expected [STEP_FINISHED, STEP_STARTED], got {out2:?}");
+        assert_eq!(
+            out2.len(),
+            2,
+            "expected [STEP_FINISHED, STEP_STARTED], got {out2:?}"
+        );
         match &out2[0] {
             Event::StepFinished(e) => assert_eq!(e.step_name, "turn-1"),
             other => panic!("expected StepFinished('turn-1'), got {other:?}"),
@@ -871,7 +961,11 @@ mod tests {
         });
 
         // Expected: [STEP_FINISHED("turn-1"), RUN_FINISHED]
-        assert_eq!(out.len(), 2, "expected [STEP_FINISHED, RUN_FINISHED], got {out:?}");
+        assert_eq!(
+            out.len(),
+            2,
+            "expected [STEP_FINISHED, RUN_FINISHED], got {out:?}"
+        );
         match &out[0] {
             Event::StepFinished(e) => assert_eq!(e.step_name, "turn-1"),
             other => panic!("expected StepFinished('turn-1'), got {other:?}"),
@@ -896,7 +990,8 @@ mod tests {
         // finish() must close the open step.
         let out = m.finish();
         assert!(
-            out.iter().any(|e| matches!(e, Event::StepFinished(s) if s.step_name == "turn-1")),
+            out.iter()
+                .any(|e| matches!(e, Event::StepFinished(s) if s.step_name == "turn-1")),
             "expected STEP_FINISHED('turn-1') in finish() output, got {out:?}"
         );
     }
@@ -1378,10 +1473,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ModelProvider for NullProvider {
-            async fn resolve(
-                &self,
-                _: &str,
-            ) -> Result<Arc<dyn Model>, ModelError> {
+            async fn resolve(&self, _: &str) -> Result<Arc<dyn Model>, ModelError> {
                 Err(ModelError::Connection("null provider — tests only".into()))
             }
             fn available_models(&self) -> Vec<String> {
@@ -1424,8 +1516,8 @@ mod tests {
     #[tokio::test]
     async fn drain_over_terminal_stream_returns_finished() {
         use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
-        use agent_core::event::RunEvent;
         use ag_ui_server::run_agent;
+        use agent_core::event::RunEvent;
         use futures::StreamExt;
 
         let sessions = Arc::new(super::super::session::SessionStore::new());
@@ -1455,9 +1547,7 @@ mod tests {
             "t-finish".into(),
             super::super::session::RunSession {
                 run_id: "r1".into(),
-                state: super::super::session::SessionState::Interrupted {
-                    pending: vec![],
-                },
+                state: super::super::session::SessionState::Interrupted { pending: vec![] },
                 created_at: std::time::Instant::now(),
                 last_active: std::time::Instant::now(),
                 resume_tx: Some(resume_tx),
@@ -1486,7 +1576,11 @@ mod tests {
         );
 
         // Session should be cleaned up after a clean finish.
-        assert_eq!(sessions.len(), 0, "session should be removed after drain finishes");
+        assert_eq!(
+            sessions.len(),
+            0,
+            "session should be removed after drain finishes"
+        );
     }
 
     // Task 3.3 — Test 1b:
@@ -1495,9 +1589,9 @@ mod tests {
     #[tokio::test]
     async fn drain_over_interrupt_stream_returns_interrupted() {
         use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use ag_ui_server::run_agent;
         use agent_core::event::RunEvent;
         use agent_core::next_step::PendingApproval;
-        use ag_ui_server::run_agent;
         use futures::StreamExt;
 
         let sessions = Arc::new(super::super::session::SessionStore::new());
@@ -1521,9 +1615,7 @@ mod tests {
             "t-interrupt".into(),
             super::super::session::RunSession {
                 run_id: "r1".into(),
-                state: super::super::session::SessionState::Interrupted {
-                    pending: vec![],
-                },
+                state: super::super::session::SessionState::Interrupted { pending: vec![] },
                 created_at: std::time::Instant::now(),
                 last_active: std::time::Instant::now(),
                 resume_tx: Some(resume_tx),
@@ -1613,9 +1705,9 @@ mod tests {
     #[tokio::test]
     async fn park_then_resume_delivers_to_second_emitter() {
         use ag_ui_protocol::{Event, ResumeEntry, ResumeStatus};
+        use ag_ui_server::run_agent;
         use agent_core::event::RunEvent;
         use agent_core::stream::StreamChunk;
-        use ag_ui_server::run_agent;
         use futures::StreamExt;
 
         let sessions = Arc::new(super::super::session::SessionStore::new());
@@ -1651,9 +1743,7 @@ mod tests {
             "t-resume".into(),
             super::super::session::RunSession {
                 run_id: "r1".into(),
-                state: super::super::session::SessionState::Interrupted {
-                    pending: vec![],
-                },
+                state: super::super::session::SessionState::Interrupted { pending: vec![] },
                 created_at: std::time::Instant::now(),
                 last_active: std::time::Instant::now(),
                 resume_tx: Some(resume_tx),
@@ -1671,9 +1761,9 @@ mod tests {
         let events: Vec<Event> = run_agent(bridge, input).collect().await;
 
         // The text content "after-resume" must appear in the second emitter's stream.
-        let has_text_content = events.iter().any(|e| {
-            matches!(e, Event::TextMessageContent(c) if c.delta == "after-resume")
-        });
+        let has_text_content = events
+            .iter()
+            .any(|e| matches!(e, Event::TextMessageContent(c) if c.delta == "after-resume"));
         assert!(
             has_text_content,
             "expected 'after-resume' text content in resume stream; events: {events:?}"
@@ -1687,7 +1777,11 @@ mod tests {
         );
 
         // Session cleaned up after successful drain.
-        assert_eq!(sessions.len(), 0, "session should be removed after clean drain");
+        assert_eq!(
+            sessions.len(),
+            0,
+            "session should be removed after clean drain"
+        );
     }
 
     // -- ArloBridge tests ------------------------------------------------------
@@ -1719,8 +1813,14 @@ mod tests {
 
         // metadata carries toolName and toolInput
         let metadata = i.metadata.as_ref().expect("metadata must be present");
-        assert_eq!(metadata.get("toolName").and_then(|v| v.as_str()), Some("shell"));
-        assert!(metadata.contains_key("toolInput"), "metadata must contain toolInput");
+        assert_eq!(
+            metadata.get("toolName").and_then(|v| v.as_str()),
+            Some("shell")
+        );
+        assert!(
+            metadata.contains_key("toolInput"),
+            "metadata must contain toolInput"
+        );
 
         // expires_at parses as RFC 3339
         let expires_at = i.expires_at.as_ref().expect("expires_at must be present");
