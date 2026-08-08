@@ -872,6 +872,22 @@ img {
   color: var(--color-text-primary);
 }
 
+.footer-lang {
+  display: flex;
+  gap: 16px;
+}
+
+.footer-lang a {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  transition: color var(--transition-fast);
+}
+
+.footer-lang a:hover,
+.footer-lang a[aria-current="page"] {
+  color: var(--color-text-primary);
+}
+
 /* ===== Responsive ===== */
 @media (max-width: 900px) {
   .hero .container {

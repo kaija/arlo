@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XSG16Z343H"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XSG16Z343H');
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>エージェントループ — Arlo</title>
+  <meta name="description" content="Arlo が 1 ターンを処理する流れ：トリガー、コンテキスト準備、モデルの推論、そして計画・ツール選択・権限チェック・実行・観察・評価からなる agentic ループ。" />
+  <meta name="theme-color" content="#5856D6" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="エージェントループ — Arlo" />
+  <meta property="og:description" content="Arlo が 1 ターンを処理する流れ：トリガー、コンテキスト準備、モデルの推論、そして計画・実行・観察・評価からなる agentic ループ。" />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="../assets/agent-loop.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+
+  <!-- Language alternates -->
+  <link rel="alternate" hreflang="en" href="https://www.arlo-ai.app/agent-loop.html" />
+  <link rel="alternate" hreflang="zh-Hant" href="https://www.arlo-ai.app/zh/agent-loop.html" />
+  <link rel="alternate" hreflang="ja" href="https://www.arlo-ai.app/ja/agent-loop.html" />
+  <link rel="alternate" hreflang="ko" href="https://www.arlo-ai.app/ko/agent-loop.html" />
+  <link rel="alternate" hreflang="x-default" href="https://www.arlo-ai.app/agent-loop.html" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="../styles.css" />
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav" aria-label="メインナビゲーション">
+    <div class="nav-inner container">
+      <a href="/ja/" class="nav-brand" aria-label="Arlo ホーム">
+        <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="7" fill="#5856D6"/>
+          <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Arlo</span>
+      </a>
+      <div class="nav-links">
+        <a href="index.html#quickstart">クイックスタート</a>
+        <a href="index.html#features">機能</a>
+        <a href="agent-loop.html">エージェントループ</a>
+        <a href="index.html#built">アーキテクチャ</a>
+        <a href="index.html#providers">プロバイダ</a>
+        <a href="https://github.com/kaija/arlo" class="btn btn-sm" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <button class="nav-toggle" aria-label="メニューを切り替える" aria-expanded="false">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Page header -->
+  <header class="page-hero">
+    <div class="container">
+      <a class="page-back" href="index.html">&larr; 概要に戻る</a>
+      <h1>エージェントループ</h1>
+      <p>どのリクエストも同じ道筋をたどります。コンテキストを準備し、タスクについて推論し、作業が終わるまでツール呼び出しを繰り返す —— これが TUI でもワンショット CLI でもライブラリでも、Arlo のすべての実行を支える中核の処理ロジックです。</p>
+    </div>
+  </header>
+
+  <!-- Loop -->
+  <section class="loop">
+    <div class="container">
+      <div class="loop-grid">
+        <figure class="loop-figure">
+          <a href="../assets/agent-loop.png" target="_blank" rel="noopener" aria-label="エージェントループの図をフルサイズで開く">
+            <img src="../assets/agent-loop.png" width="1024" height="1568"
+                 alt="エージェントループのフローチャート。ユーザー・スケジュール・イベント・通知・MCP リクエストからのプロンプトがコンテキスト準備とモデル推論に入り、その後、計画・ツール選択・権限チェック・ツール実行・結果の観察・メモリ更新・タスク評価を、これ以上のアクションが不要になるまで繰り返し、最終応答・後処理・セッション終了へ至る。セッションは後で再開できる。" />
+          </a>
+          <figcaption>トリガーからセッション終了までの実行ループ全体 —— クリックで拡大。</figcaption>
+        </figure>
+        <div class="loop-phases">
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-trigger">トリガー</span>
+            <p>ターンはユーザーのプロンプト、スケジュールされたタスク、イベントや webhook、通知、MCP リクエストから始まります。どこから来ても同じパイプラインに入り、専用の抜け道はありません。</p>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-request">各リクエスト</span>
+            <ol class="loop-list">
+              <li><strong>プロンプト</strong> —— どのトリガーから来たかに関わらず、受け取ったリクエストを正規化。</li>
+              <li><strong>コンテキスト準備</strong> —— 履歴・ファイル・ツールスキーマを取得・組み立て・圧縮し、コンテキストウィンドウに収める。</li>
+              <li><strong>モデルの推論</strong> —— 何かに手をつける前に、モデルがタスクを理解し進め方を計画する。</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-agentic">Agentic ループ</span>
+            <ol class="loop-list">
+              <li><strong>次のアクションを計画</strong> —— 次の 1 ステップだけを決める。</li>
+              <li><strong>ツール選択</strong> —— そのステップに最適なツールを選ぶ。</li>
+              <li><strong>権限チェック</strong> —— Human-in-the-Loop のゲート。拒否された呼び出しは実行されない。</li>
+              <li><strong>ツール実行</strong> —— アクションを実行する。</li>
+              <li><strong>結果の観察</strong> —— 失敗も含め、出力とフィードバックを収集する。</li>
+              <li><strong>メモリ更新</strong> —— 結果をコンテキストとセッション状態に反映する。</li>
+              <li><strong>タスク評価</strong> —— まだ作業が必要か？必要なら計画へ戻り、不要ならループを抜ける。</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-done">完了</span>
+            <ol class="loop-list">
+              <li><strong>最終応答</strong> —— 回答を生成し、要約し、届ける。</li>
+              <li><strong>後処理</strong> —— ログ、監査証跡、テレメトリ。</li>
+              <li><strong>セッション終了</strong> —— 状態は永続化されるので、後のトリガーが同じセッションを再開できる。</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+      <p class="loop-footnote">
+        各ステップはイベントとしてストリーミングされます。TUI がライブで描画しているのはこれであり、Arlo を組み込むアプリケーションが購読できるのもこれです。
+        <a href="index.html#built">アーキテクチャを見る &rarr;</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg class="nav-logo" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect width="28" height="28" rx="7" fill="#5856D6"/>
+            <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <span>Arlo</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/kaija/arlo" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/kaija/arlo/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">ライセンス</a>
+          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">コントリビュート</a>
+        </div>
+        <div class="footer-lang">
+          <a href="/agent-loop.html">English</a>
+          <a href="/zh/agent-loop.html">中文</a>
+          <a href="/ja/agent-loop.html" aria-current="page">日本語</a>
+          <a href="/ko/agent-loop.html">한국어</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

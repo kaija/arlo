@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XSG16Z343H"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XSG16Z343H');
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent 迴圈 — Arlo</title>
+  <meta name="description" content="Arlo 如何處理一個回合：觸發來源、上下文準備、模型推理，以及規劃、選擇工具、權限檢查、執行、觀察與評估的 agentic 迴圈。" />
+  <meta name="theme-color" content="#5856D6" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Agent 迴圈 — Arlo" />
+  <meta property="og:description" content="Arlo 如何處理一個回合：觸發來源、上下文準備、模型推理，以及規劃、執行、觀察與評估的 agentic 迴圈。" />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="../assets/agent-loop.png" />
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+
+  <!-- Language alternates -->
+  <link rel="alternate" hreflang="en" href="https://www.arlo-ai.app/agent-loop.html" />
+  <link rel="alternate" hreflang="zh-Hant" href="https://www.arlo-ai.app/zh/agent-loop.html" />
+  <link rel="alternate" hreflang="ja" href="https://www.arlo-ai.app/ja/agent-loop.html" />
+  <link rel="alternate" hreflang="ko" href="https://www.arlo-ai.app/ko/agent-loop.html" />
+  <link rel="alternate" hreflang="x-default" href="https://www.arlo-ai.app/agent-loop.html" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="../styles.css" />
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav" aria-label="主要導覽">
+    <div class="nav-inner container">
+      <a href="/zh/" class="nav-brand" aria-label="Arlo 首頁">
+        <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="7" fill="#5856D6"/>
+          <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Arlo</span>
+      </a>
+      <div class="nav-links">
+        <a href="index.html#quickstart">快速開始</a>
+        <a href="index.html#features">功能</a>
+        <a href="agent-loop.html">Agent 迴圈</a>
+        <a href="index.html#built">架構設計</a>
+        <a href="index.html#providers">供應商</a>
+        <a href="https://github.com/kaija/arlo" class="btn btn-sm" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+      <button class="nav-toggle" aria-label="切換選單" aria-expanded="false">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Page header -->
+  <header class="page-hero">
+    <div class="container">
+      <a class="page-back" href="index.html">&larr; 回到總覽</a>
+      <h1>Agent 迴圈</h1>
+      <p>每一次請求都走同一條路徑：準備上下文、對任務進行推理，接著反覆呼叫工具直到工作完成。這就是每一次 Arlo 執行背後的核心處理邏輯 —— 無論是在 TUI、單次 CLI 指令，或函式庫中皆然。</p>
+    </div>
+  </header>
+
+  <!-- Loop -->
+  <section class="loop">
+    <div class="container">
+      <div class="loop-grid">
+        <figure class="loop-figure">
+          <a href="../assets/agent-loop.png" target="_blank" rel="noopener" aria-label="開啟完整尺寸的 agent 迴圈流程圖">
+            <img src="../assets/agent-loop.png" width="1024" height="1568"
+                 alt="Agent 迴圈流程圖：來自使用者、排程、事件、通知或 MCP 請求的提示進入上下文準備與模型推理，接著反覆進行規劃、選擇工具、權限檢查、執行工具、觀察結果、更新記憶與評估任務，直到不需要更多動作為止，最後產生最終回應、後處理，並結束 session，之後可再恢復。" />
+          </a>
+          <figcaption>從觸發到 session 結束的完整執行迴圈 —— 點擊可放大。</figcaption>
+        </figure>
+        <div class="loop-phases">
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-trigger">觸發來源</span>
+            <p>一個回合可能由使用者提示、排程任務、事件或 webhook、通知，或 MCP 請求啟動。無論來源為何，都進入同一條管線 —— 沒有任何來源享有私有的程式路徑。</p>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-request">每一次請求</span>
+            <ol class="loop-list">
+              <li><strong>提示</strong> —— 傳入的請求，無論由哪種觸發來源產生，都會被正規化。</li>
+              <li><strong>上下文準備</strong> —— 檢索、組裝並壓縮歷史紀錄、檔案與工具 schema，以塞進上下文視窗。</li>
+              <li><strong>模型推理</strong> —— 模型先理解任務並規劃做法，再動手處理任何事情。</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-agentic">Agentic 迴圈</span>
+            <ol class="loop-list">
+              <li><strong>規劃下一步</strong> —— 決定接下來唯一的一個步驟。</li>
+              <li><strong>選擇工具</strong> —— 為該步驟挑選最合適的工具。</li>
+              <li><strong>權限檢查</strong> —— 人機協作的關卡；被拒絕的呼叫絕不會執行。</li>
+              <li><strong>執行工具</strong> —— 實際執行該動作。</li>
+              <li><strong>觀察結果</strong> —— 收集輸出與回饋，包含失敗的情況。</li>
+              <li><strong>更新記憶</strong> —— 把結果併回上下文與 session 狀態。</li>
+              <li><strong>評估任務</strong> —— 還需要做更多事嗎？需要就回到規劃，不需要就離開迴圈。</li>
+            </ol>
+          </div>
+          <div class="loop-phase">
+            <span class="loop-tag loop-tag-done">完成</span>
+            <ol class="loop-list">
+              <li><strong>最終回應</strong> —— 產生、摘要並交付答案。</li>
+              <li><strong>後處理</strong> —— 記錄檔、稽核軌跡與遙測資料。</li>
+              <li><strong>Session 結束</strong> —— 狀態會被保存，之後的觸發可以接續同一個 session。</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+      <p class="loop-footnote">
+        每個步驟都以事件形式串流輸出，這正是 TUI 即時渲染的內容，也是嵌入 Arlo 的應用程式可以訂閱的對象。
+        <a href="index.html#built">看看架構怎麼設計 &rarr;</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg class="nav-logo" width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect width="28" height="28" rx="7" fill="#5856D6"/>
+            <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 19H20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <span>Arlo</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/kaija/arlo" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/kaija/arlo/issues" target="_blank" rel="noopener">問題回報</a>
+          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">授權條款</a>
+          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">參與貢獻</a>
+        </div>
+        <div class="footer-lang">
+          <a href="/agent-loop.html">English</a>
+          <a href="/zh/agent-loop.html" aria-current="page">中文</a>
+          <a href="/ja/agent-loop.html">日本語</a>
+          <a href="/ko/agent-loop.html">한국어</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

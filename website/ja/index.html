@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja" data-copied="コピーしました！">
 <head>
   <!-- Google tag (gtag.js) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-XSG16Z343H"></script>
@@ -11,17 +11,17 @@
   </script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Arlo — Rust-native Agentic AI Framework</title>
-  <meta name="description" content="Arlo is a free, open-source, provider-agnostic agentic AI framework written in Rust. Streaming run loop, MCP, sub-agents, human-in-the-loop permissions — as a TUI, CLI, or embeddable library." />
+  <title>Arlo — Rust 製 Agentic AI フレームワーク</title>
+  <meta name="description" content="Arlo は Rust で書かれた、無料・オープンソース・プロバイダ非依存の agentic AI フレームワークです。ストリーミング実行ループ、MCP、sub-agent、Human-in-the-Loop 権限制御を、TUI・CLI・組み込みライブラリとして提供します。" />
   <meta name="theme-color" content="#5856D6" />
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Arlo — Rust-native Agentic AI Framework" />
-  <meta property="og:description" content="A free, open-source, provider-agnostic agentic AI framework in Rust. Streaming run loop, MCP, sub-agents, human-in-the-loop permissions." />
+  <meta property="og:title" content="Arlo — Rust 製 Agentic AI フレームワーク" />
+  <meta property="og:description" content="無料・オープンソース・プロバイダ非依存の Rust 製 agentic AI フレームワーク。ストリーミング実行ループ、MCP、sub-agent、Human-in-the-Loop 権限制御。" />
   <meta property="og:type" content="website" />
 
   <!-- Favicon -->
-  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
 
   <!-- Language alternates -->
   <link rel="alternate" hreflang="en" href="https://www.arlo-ai.app/" />
@@ -35,13 +35,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
   <!-- Navigation -->
-  <nav class="nav" aria-label="Main navigation">
+  <nav class="nav" aria-label="メインナビゲーション">
     <div class="nav-inner container">
-      <a href="/" class="nav-brand" aria-label="Arlo home">
+      <a href="/ja/" class="nav-brand" aria-label="Arlo ホーム">
         <svg class="nav-logo" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
           <rect width="28" height="28" rx="7" fill="#5856D6"/>
           <path d="M8 9L13 14L8 19" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -50,18 +50,18 @@
         <span>Arlo</span>
       </a>
       <div class="nav-links">
-        <a href="#quickstart">Quick Start</a>
-        <a href="#features">Features</a>
-        <a href="agent-loop.html">Agent Loop</a>
-        <a href="#built">How It's Built</a>
-        <a href="#providers">Providers</a>
-        <a href="#integrations">Integrations</a>
+        <a href="#quickstart">クイックスタート</a>
+        <a href="#features">機能</a>
+        <a href="agent-loop.html">エージェントループ</a>
+        <a href="#built">アーキテクチャ</a>
+        <a href="#providers">プロバイダ</a>
+        <a href="#integrations">インテグレーション</a>
         <a href="https://github.com/kaija/arlo" class="btn btn-sm" target="_blank" rel="noopener">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           GitHub
         </a>
       </div>
-      <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">
+      <button class="nav-toggle" aria-label="メニューを切り替える" aria-expanded="false">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
       </button>
     </div>
@@ -71,21 +71,21 @@
   <section class="hero">
     <div class="container">
       <div class="hero-content">
-        <div class="hero-badge">Free &amp; Open Source · MIT</div>
-        <h1>Your agent,<br/>your keys,<br/>your terminal.</h1>
+        <div class="hero-badge">無料・オープンソース · MIT</div>
+        <h1>あなたのエージェント、<br/>あなたの鍵、<br/>あなたのターミナル。</h1>
         <p class="hero-subtitle">
-          Arlo is an open-source, Rust-native agentic AI framework — a leaner, more general-purpose take on what tools like Claude Code offer. A streaming run loop with tool use, human-in-the-loop permissions, sub-agents, MCP integration, and Agent Skills, exposed as a TUI, a one-shot CLI, or an embeddable library.
+          Arlo は Rust 製のオープンソース agentic AI フレームワークです。Claude Code が提供するような機能を模しつつ、よりシンプルで汎用的に作られています。ツール呼び出し、Human-in-the-Loop（HITL）権限制御、sub-agent、MCP 連携、Agent Skills を備えたストリーミング実行ループを、対話型 TUI・ワンショット CLI・組み込み可能なライブラリとして提供します。
         </p>
         <div class="hero-actions">
-          <a href="#quickstart" class="btn btn-primary">Quick Start</a>
+          <a href="#quickstart" class="btn btn-primary">クイックスタート</a>
           <a href="https://github.com/kaija/arlo" class="btn btn-secondary" target="_blank" rel="noopener">
             <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-            View on GitHub
+            GitHub で見る
           </a>
         </div>
       </div>
       <div class="hero-visual">
-        <div class="terminal-frame" role="img" aria-label="Terminal session showing arlo running an agentic task with a permission request">
+        <div class="terminal-frame" role="img" aria-label="arlo が agentic なタスクを実行し、権限リクエストを表示しているターミナル画面">
           <div class="terminal-titlebar">
             <span class="terminal-dot terminal-dot-red"></span>
             <span class="terminal-dot terminal-dot-yellow"></span>
@@ -117,23 +117,23 @@
     <div class="container">
       <div class="quickstart-inner">
         <div class="section-header">
-          <h2>Up and running in a minute</h2>
-          <p>Requires stable Rust, installed via <a href="https://rustup.rs" target="_blank" rel="noopener" style="color: var(--color-accent); text-decoration: underline;">rustup</a>.</p>
+          <h2>1 分ではじめる</h2>
+          <p>stable 版 Rust が必要です（<a href="https://rustup.rs" target="_blank" rel="noopener" style="color: var(--color-accent); text-decoration: underline;">rustup</a> からインストール）。</p>
         </div>
         <div class="code-block">
-          <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
-          <pre><span class="cmt"># clone and build</span>
+          <button class="copy-btn" type="button" aria-label="コピー">コピー</button>
+          <pre><span class="cmt"># clone してビルド</span>
 git clone https://github.com/kaija/arlo.git
 cd arlo
 cargo build --release</pre>
         </div>
         <div class="code-block">
-          <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
-          <pre><span class="cmt"># set credentials for your provider</span>
+          <button class="copy-btn" type="button" aria-label="コピー">コピー</button>
+          <pre><span class="cmt"># 使用する provider の認証情報を設定</span>
 export OPENAI_API_KEY="sk-..."
 
-cargo run -p agent-cli                          <span class="cmt"># interactive TUI</span>
-cargo run -p agent-cli -- "summarize this repo"  <span class="cmt"># one-shot prompt</span>
+cargo run -p agent-cli                          <span class="cmt"># 対話型 TUI</span>
+cargo run -p agent-cli -- "summarize this repo"  <span class="cmt"># ワンショット実行</span>
 
 arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span> <span class="flag">[--profile</span> NAME<span class="flag">]</span> "prompt"</pre>
         </div>
@@ -145,51 +145,51 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
   <section id="features" class="features">
     <div class="container">
       <div class="section-header">
-        <h2>A small core, fully capable</h2>
-        <p>Everything an agent needs to plan, act, and stay in the loop with you.</p>
+        <h2>小さなコア、十分な機能</h2>
+        <p>エージェントが計画し、行動し、あなたと連携し続けるために必要なものすべて。</p>
       </div>
       <div class="features-grid">
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
           </div>
-          <h3>Agentic Run Loop</h3>
-          <p>Turn-based loop — compact → request → stream → execute tools → resolve next step — with typed state transitions and automatic error recovery.</p>
+          <h3>Agentic 実行ループ</h3>
+          <p>ターン単位のループ —— コンテキスト圧縮 → リクエスト送信 → ストリーミング応答 → ツール実行 → 次ステップの決定 —— を、型付きの状態遷移と自動エラーリカバリとともに実行します。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>
           </div>
-          <h3>MCP Client</h3>
-          <p>Connect external tool servers via the Model Context Protocol alongside built-in file, shell, and web tools.</p>
+          <h3>MCP クライアント</h3>
+          <p>Model Context Protocol 経由で外部ツールサーバーに接続し、組み込みのファイル・shell・web ツールと併用できます。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           </div>
           <h3>Agent Skills</h3>
-          <p>Discover and load Markdown-defined skills from <code>.arlo/skills/</code> (project) and <code>~/.arlo/skills/</code> (user), with template variable substitution.</p>
+          <p><code>.arlo/skills/</code>（プロジェクト単位）と <code>~/.arlo/skills/</code>（ユーザー単位）から Markdown 定義のスキルを検出・読み込み。テンプレート変数の置換にも対応します。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
           </div>
-          <h3>Human-in-the-Loop Permissions</h3>
-          <p>A 4-layer permission engine — glob patterns, static allow/deny lists, and interactive approval prompts — keeps you in control of every tool call.</p>
+          <h3>Human-in-the-Loop 権限制御</h3>
+          <p>4 層構成の権限エンジン —— glob パターン、静的な allow/deny リスト、対話的な承認プロンプト —— により、すべてのツール呼び出しをあなたの管理下に置きます。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
           </div>
-          <h3>Task Management &amp; Sub-agents</h3>
-          <p>A built-in task/todo store; spawn foreground or background sub-agents with isolated histories — results deliver back exactly once.</p>
+          <h3>タスク管理と sub-agent</h3>
+          <p>組み込みの Task/Todo ストア。独立した履歴を持つフォアグラウンド／バックグラウンドの sub-agent を起動でき、結果は確実に一度だけ返されます。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a9 9 0 10-3.6 7.2L21 21"/></svg>
           </div>
-          <h3>Context Compaction</h3>
-          <p>A 3-layer pipeline — tool-result compaction, session memory, full summarization — keeps long runs inside the context window.</p>
+          <h3>コンテキスト圧縮</h3>
+          <p>3 層のパイプライン —— ツール結果の圧縮、セッションメモリ、完全な要約 —— により、長時間の実行でもコンテキストウィンドウに収めます。</p>
         </div>
       </div>
     </div>
@@ -199,34 +199,34 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
   <section id="built" class="built">
     <div class="container">
       <div class="section-header">
-        <h2>One core, three interfaces</h2>
-        <p>The same Rust core, wherever you need to run it.</p>
+        <h2>ひとつのコア、3 つのインターフェース</h2>
+        <p>同じ Rust コアを、必要な場所どこでも。</p>
       </div>
       <div class="built-grid">
         <div class="interface-card">
           <div class="interface-icon">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
           </div>
-          <h3>Interactive TUI</h3>
-          <p>A ratatui REPL for chatting with the agent, watching tool calls stream, and approving permissions live.</p>
+          <h3>対話型 TUI</h3>
+          <p>ratatui 製の REPL。エージェントと対話し、ツール呼び出しのストリームを眺め、その場で権限を承認できます。</p>
         </div>
         <div class="interface-card">
           <div class="interface-icon">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
           </div>
-          <h3>One-shot CLI</h3>
-          <p>Run <code>arlo "prompt"</code> straight from a script or CI job — no prompt starts the interactive REPL instead.</p>
+          <h3>ワンショット CLI</h3>
+          <p>スクリプトや CI ジョブから <code>arlo "prompt"</code> をそのまま実行。プロンプトなしで起動すると対話型 REPL になります。</p>
         </div>
         <div class="interface-card">
           <div class="interface-icon">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4.9V17l-9 4.9-9-4.9V6.9L12 2z"/><path d="M12 22V12M21 6.9L12 12 3 6.9"/></svg>
           </div>
-          <h3>Embeddable Library</h3>
-          <p>Pull the crates directly into your own Rust application and wire the run loop into whatever surface you need.</p>
+          <h3>組み込みライブラリ</h3>
+          <p>crate を自作の Rust アプリケーションに直接取り込み、実行ループを好きなインターフェースに接続できます。</p>
         </div>
       </div>
       <div class="crates-content">
-        <h3>Five small crates, each swappable</h3>
+        <h3>5 つの小さな crate、それぞれ差し替え可能</h3>
         <div class="tech-pills">
           <span class="pill">agent-core</span>
           <span class="pill">agent-llm</span>
@@ -242,8 +242,8 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
   <section id="providers" class="providers">
     <div class="container">
       <div class="section-header">
-        <h2>Provider-agnostic by design</h2>
-        <p>Point Arlo at the model you want — hosted or your own.</p>
+        <h2>設計段階からプロバイダ非依存</h2>
+        <p>使いたいモデルに Arlo を向けるだけ —— ホスト型でも自前でも。</p>
       </div>
       <div class="providers-grid">
         <div class="provider-card">
@@ -251,21 +251,21 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M16 4L6 10v12l10 6 10-6V10L16 4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 16v12M16 16L6 10M16 16l10-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </div>
           <h3>Anthropic</h3>
-          <p>Messages API, Claude Opus, Sonnet, and Haiku models, with retry and model overrides built in.</p>
+          <p>Messages API。Claude Opus・Sonnet・Haiku モデルに対応し、リトライとモデル上書きを標準装備。</p>
         </div>
         <div class="provider-card">
           <div class="provider-logo">
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/><path d="M16 8v8l5.66 5.66" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </div>
-          <h3>OpenAI-Compatible</h3>
-          <p>Any OpenAI-compatible HTTP API — set <code>OPENAI_API_KEY</code> and go.</p>
+          <h3>OpenAI 互換</h3>
+          <p>OpenAI 互換の HTTP API なら何でも —— <code>OPENAI_API_KEY</code> を設定すればすぐ使えます。</p>
         </div>
         <div class="provider-card">
           <div class="provider-logo">
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><rect x="6" y="6" width="20" height="20" rx="4" stroke="currentColor" stroke-width="2"/><path d="M11 16h10M16 11v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </div>
-          <h3>Local Model Server</h3>
-          <p>Point <code>OPENAI_BASE_URL</code> at your own self-hosted or local inference server.</p>
+          <h3>ローカルモデルサーバー</h3>
+          <p><code>OPENAI_BASE_URL</code> を自前ホスト／ローカルの推論サーバーに向けるだけ。</p>
         </div>
       </div>
     </div>
@@ -275,8 +275,8 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
   <section id="integrations" class="integrations">
     <div class="container">
       <div class="section-header">
-        <h2>Deploy anywhere</h2>
-        <p>Arlo ships a serve mode that speaks AG-UI over HTTP + SSE. These reference integrations show how to wire it into a browser or a Slack workspace with no extra infrastructure.</p>
+        <h2>どこにでもデプロイ</h2>
+        <p>Arlo には HTTP + SSE で AG-UI を話す serve モードが付属しています。以下のリファレンス実装は、追加のインフラなしでブラウザや Slack ワークスペースに組み込む方法を示すものです。</p>
       </div>
       <div class="integrations-grid">
         <!-- Web -->
@@ -286,31 +286,31 @@ arlo <span class="flag">[--model</span> PROVIDER:MODEL<span class="flag">]</span
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
             </div>
             <div class="integration-title-group">
-              <h3>Web Chat</h3>
+              <h3>Web チャット</h3>
               <span class="integration-tag">Next.js · Docker</span>
             </div>
           </div>
-          <p>A browser chat UI built on Next.js that proxies to <code>arlo --serve</code>. Streams text, shows tool calls inline, and renders human-in-the-loop approval cards so you can allow or deny each tool call without leaving the browser.</p>
+          <p>Next.js で作られたブラウザ用チャット UI が <code>arlo --serve</code> にプロキシします。テキストをストリーミング表示し、ツール呼び出しをインラインで見せ、Human-in-the-Loop の承認カードを描画するので、ブラウザを離れずに各ツール呼び出しを許可／拒否できます。</p>
           <div class="integration-arch">
-            <code>Browser → Next.js (port 3000) → Arlo (internal :8080)</code>
+            <code>ブラウザ → Next.js（port 3000）→ Arlo（内部 :8080）</code>
           </div>
           <ul class="integration-features">
-            <li>Streaming text updates as tokens arrive</li>
-            <li>Inline tool-call visibility with allow / always-allow / deny</li>
-            <li>Approval requests expire after 10 min, no stale buttons</li>
-            <li>Arlo container is fully internal — browser only reaches the Next.js proxy</li>
+            <li>トークン到着に合わせてテキストをストリーミング更新</li>
+            <li>ツール呼び出しをインライン表示し、許可／常に許可／拒否を選択</li>
+            <li>承認リクエストは 10 分で失効し、古いボタンが残らない</li>
+            <li>Arlo コンテナは完全に内部 —— ブラウザは Next.js プロキシにしか到達しない</li>
           </ul>
           <div class="integration-quickstart">
             <div class="code-block">
-              <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
+              <button class="copy-btn" type="button" aria-label="コピー">コピー</button>
               <pre>cd integration/web
-cp .env.example .env   <span class="cmt"># set ARLO_MODEL + provider key</span>
+cp .env.example .env   <span class="cmt"># ARLO_MODEL と provider の鍵を設定</span>
 docker compose up --build
-<span class="cmt"># open http://localhost:3000</span></pre>
+<span class="cmt"># http://localhost:3000 を開く</span></pre>
             </div>
           </div>
           <a href="https://github.com/kaija/arlo/tree/main/integration/web" class="integration-link" target="_blank" rel="noopener">
-            View source
+            ソースを見る
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           </a>
         </div>
@@ -322,32 +322,32 @@ docker compose up --build
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/><path d="M9.5 14c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5S8 21.33 8 20.5v-5c0-.83.67-1.5 1.5-1.5z"/><path d="M3.5 14H5v1.5c0 .83-.67 1.5-1.5 1.5S2 16.33 2 15.5 2.67 14 3.5 14z"/><path d="M14 14.5c0-.83.67-1.5 1.5-1.5h5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-5c-.83 0-1.5-.67-1.5-1.5z"/><path d="M15.5 19H14v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5-.67-1.5-1.5-1.5z"/><path d="M10 9.5C10 8.67 9.33 8 8.5 8h-5C2.67 8 2 8.67 2 9.5S2.67 11 3.5 11h5c.83 0 1.5-.67 1.5-1.5z"/><path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/></svg>
             </div>
             <div class="integration-title-group">
-              <h3>Slack Bot</h3>
+              <h3>Slack ボット</h3>
               <span class="integration-tag">Python · Socket Mode · Docker</span>
             </div>
           </div>
-          <p>A Python proxy (<code>arlo-slack</code>) holds a Slack Socket Mode websocket, replays the thread to <code>arlo --serve</code> over AG-UI, and streams the reply back into Slack. Slack is the conversation store — no database, no host mounts.</p>
+          <p>Python 製のプロキシ（<code>arlo-slack</code>）が Slack の Socket Mode websocket を保持し、スレッドを AG-UI 経由で <code>arlo --serve</code> に再生して、応答を Slack にストリーミングで返します。会話の保存先は Slack 自体 —— データベースもホストのマウントも不要です。</p>
           <div class="integration-arch">
-            <code>Slack ⇄ slack-proxy ⇄ arlo (websocket / HTTP + SSE)</code>
+            <code>Slack ⇄ slack-proxy ⇄ arlo（websocket / HTTP + SSE）</code>
           </div>
           <ul class="integration-features">
-            <li>@mention in a channel or DM to start; replies continue the thread</li>
-            <li>Live message updates ~1 s, long answers chunked into thread replies</li>
-            <li>Queue per thread — a second message waits, never stomps a running turn</li>
+            <li>チャンネルでの @mention か DM で開始。返信はスレッドを継続</li>
+            <li>メッセージは約 1 秒ごとに更新、長い回答はスレッド返信に分割</li>
+            <li>スレッドごとのキュー —— 2 通目は待機し、実行中のターンを壊さない</li>
             <li>
-              <code>SLACK_ALLOWED_CHANNELS</code> / <code>SLACK_ALLOWED_USERS</code> allowlists for access control
+              アクセス制御は <code>SLACK_ALLOWED_CHANNELS</code> / <code>SLACK_ALLOWED_USERS</code> の許可リストで
             </li>
           </ul>
           <div class="integration-quickstart">
             <div class="code-block">
-              <button class="copy-btn" type="button" aria-label="Copy">Copy</button>
+              <button class="copy-btn" type="button" aria-label="コピー">コピー</button>
               <pre>cd integration/slack
-cp .env.example .env   <span class="cmt"># set SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ARLO_MODEL</span>
+cp .env.example .env   <span class="cmt"># SLACK_BOT_TOKEN、SLACK_APP_TOKEN、ARLO_MODEL を設定</span>
 docker compose up --build</pre>
             </div>
           </div>
           <a href="https://github.com/kaija/arlo/tree/main/integration/slack" class="integration-link" target="_blank" rel="noopener">
-            View source
+            ソースを見る
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           </a>
         </div>
@@ -356,7 +356,7 @@ docker compose up --build</pre>
       <!-- Security callout -->
       <div class="integration-security">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <p><strong>Serve mode runs tools without approval prompts.</strong> Both integrations use containerized deployments — disposable containers, no host mounts, read-only rootfs, tmpfs workspace, memory and pid limits. Do not expose the Arlo port directly; always go through the proxy.</p>
+        <p><strong>serve モードは承認プロンプトなしでツールを実行します。</strong>どちらのインテグレーションもコンテナ化された構成です —— 使い捨てコンテナ、ホストマウントなし、read-only な rootfs、tmpfs のワークスペース、メモリと pid の制限。Arlo のポートを直接公開せず、必ずプロキシ経由でアクセスしてください。</p>
       </div>
     </div>
   </section>
@@ -376,19 +376,19 @@ docker compose up --build</pre>
         <div class="footer-links">
           <a href="https://github.com/kaija/arlo" target="_blank" rel="noopener">GitHub</a>
           <a href="https://github.com/kaija/arlo/issues" target="_blank" rel="noopener">Issues</a>
-          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
-          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+          <a href="https://github.com/kaija/arlo/blob/main/LICENSE" target="_blank" rel="noopener">ライセンス</a>
+          <a href="https://github.com/kaija/arlo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">コントリビュート</a>
         </div>
         <div class="footer-lang">
-          <a href="/" aria-current="page">English</a>
+          <a href="/">English</a>
           <a href="/zh/">中文</a>
-          <a href="/ja/">日本語</a>
+          <a href="/ja/" aria-current="page">日本語</a>
           <a href="/ko/">한국어</a>
         </div>
       </div>
     </div>
   </footer>
 
-  <script src="main.js"></script>
+  <script src="../main.js"></script>
 </body>
 </html>

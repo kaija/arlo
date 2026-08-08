@@ -53,7 +53,7 @@
       const text = pre.textContent;
       const showCopied = function () {
         const original = btn.textContent;
-        btn.textContent = 'Copied!';
+        btn.textContent = document.documentElement.dataset.copied || 'Copied!';
         setTimeout(function () { btn.textContent = original; }, 1500);
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
