@@ -1,0 +1,8 @@
+/* Inter is loaded from Google Fonts on all four Arlo sites (weights 400–700).
+   No font binaries live in the repos; this @import mirrors the sites' <link>. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* --font-mono is a system stack upstream ('SF Mono', 'Fira Code', 'JetBrains Mono').
+   Fira Code is served from Google Fonts so the second step of the stack resolves
+   off Apple platforms; family and stack order are unchanged. */
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&display=swap');

@@ -29,7 +29,10 @@ function TimeRemaining({ expiresAt }: { expiresAt?: string }) {
 
   if (!expiresAt) return null;
   return (
-    <span style={{ color: expired ? "red" : "gray", fontSize: "0.85em" }}>
+    <span
+      className={expired ? "badge badge-danger" : "badge badge-neutral"}
+      style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}
+    >
       {remaining}
     </span>
   );
@@ -53,53 +56,27 @@ export function ApprovalCard() {
           : (interrupt?.message ?? interrupt?.reason ?? "Approval required");
 
       return (
-        <div
-          style={{
-            border: "1px solid #e0e0e0",
-            borderRadius: "8px",
-            padding: "16px",
-            margin: "8px 0",
-            background: "#fff8e1",
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: "8px" }}>
-            Tool approval required
+        <div className="approval card card-sm">
+          <div className="approval-head">
+            <span className="badge badge-warning">
+              <span className="badge-dot" />
+              Tool approval required
+            </span>
+            <TimeRemaining expiresAt={expiresAt} />
           </div>
-          <pre
-            style={{
-              background: "#f5f5f5",
-              padding: "8px",
-              borderRadius: "4px",
-              fontSize: "0.85em",
-              overflow: "auto",
-              maxHeight: "200px",
-            }}
-          >
-            {description}
-          </pre>
-          <div
-            style={{
-              display: "flex",
-              gap: "8px",
-              marginTop: "12px",
-              alignItems: "center",
-            }}
-          >
+
+          <pre className="approval-tool">{description}</pre>
+
+          <div className="approval-actions">
             <button
+              className="btn btn-sm btn-primary"
               disabled={isExpired}
               onClick={() => resolve({})}
-              style={{
-                padding: "6px 14px",
-                background: isExpired ? "#ccc" : "#4caf50",
-                color: "#fff",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isExpired ? "not-allowed" : "pointer",
-              }}
             >
               Allow once
             </button>
             <button
+              className="btn btn-sm"
               disabled={isExpired}
               onClick={() =>
                 resolve({
@@ -107,36 +84,21 @@ export function ApprovalCard() {
                   pattern: toolName ? `${toolName}(*)` : "*",
                 })
               }
-              style={{
-                padding: "6px 14px",
-                background: isExpired ? "#ccc" : "#2196f3",
-                color: "#fff",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isExpired ? "not-allowed" : "pointer",
-              }}
             >
               Always allow
             </button>
             <button
+              className="btn btn-sm btn-danger"
               disabled={isExpired}
               onClick={() => cancel()}
-              style={{
-                padding: "6px 14px",
-                background: isExpired ? "#ccc" : "#f44336",
-                color: "#fff",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isExpired ? "not-allowed" : "pointer",
-              }}
             >
               Deny
             </button>
-            <TimeRemaining expiresAt={expiresAt} />
           </div>
+
           {isExpired && (
-            <p style={{ color: "red", marginTop: "8px", fontSize: "0.9em" }}>
-              This session has expired. Please start a new conversation.
+            <p className="field-hint field-hint-error" style={{ marginTop: "12px" }}>
+              This session has expired. Reload the page to start a new conversation.
             </p>
           )}
         </div>

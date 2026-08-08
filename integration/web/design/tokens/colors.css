@@ -1,0 +1,32 @@
+:root{
+--color-accent:#5856D6;
+--color-accent-hover:#4745B5;
+--color-accent-light:rgba(88,86,214,0.08);
+--color-accent-glow:rgba(88,86,214,0.15);
+--color-text-primary:#1a1a2e;
+--color-text-secondary:#64648c;
+--color-text-tertiary:#8e8eaa;
+--color-bg:#ffffff;
+--color-bg-secondary:#f8f8fc;
+--color-bg-tertiary:#f0f0f8;
+--color-border:rgba(0,0,0,0.06);
+--color-border-strong:rgba(0,0,0,0.1);
+/* status — indigo-adjacent, same low-chroma family as the accent */
+--color-success:#1f9d6b;
+--color-success-light:rgba(31,157,107,0.08);
+--color-warning:#c07a12;
+--color-warning-light:rgba(192,122,18,0.08);
+--color-danger:#d1435b;
+--color-danger-light:rgba(209,67,91,0.08);
+--color-scrim:rgba(26,26,46,0.4);
+/* semantic aliases */
+--surface-page:var(--color-bg);
+--surface-section:var(--color-bg-secondary);
+--surface-card:var(--color-bg);
+--text-body:var(--color-text-primary);
+--text-muted:var(--color-text-secondary);
+--text-faint:var(--color-text-tertiary);
+--text-on-accent:#ffffff;
+--surface-sunken:var(--color-bg-tertiary);
+--status-info:var(--color-accent);
+}

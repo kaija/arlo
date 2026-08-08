@@ -1,0 +1,254 @@
+/* Arlo AI design system (../design) + the mapping that dresses CopilotKit's
+   chat in it. CopilotKit exposes CSS variables and stable class names, so this
+   is a stylesheet, not a fork of its components. */
+@import "../design/tokens/fonts.css";
+@import "../design/tokens/colors.css";
+@import "../design/tokens/typography.css";
+@import "../design/tokens/effects.css";
+@import "../design/css/base.css";
+@import "../design/css/components.css";
+@import "../design/css/ui.css";
+
+:root {
+  --chat-width: 768px;
+
+  /* CopilotKit theme hooks → Arlo tokens */
+  --copilot-kit-primary-color: var(--color-accent);
+  --copilot-kit-contrast-color: #fff;
+  --copilot-kit-background-color: var(--color-bg);
+  --copilot-kit-input-background-color: var(--color-bg);
+  --copilot-kit-secondary-color: var(--color-bg-secondary);
+  --copilot-kit-secondary-contrast-color: var(--color-text-primary);
+  --copilot-kit-separator-color: var(--color-border-strong);
+  --copilot-kit-muted-color: var(--color-text-tertiary);
+  --copilot-kit-shadow-sm: var(--shadow-sm);
+  --copilot-kit-shadow-md: var(--shadow-md);
+  --copilot-kit-shadow-lg: var(--shadow-lg);
+  --copilot-kit-error-background: var(--color-danger-light);
+  --copilot-kit-error-border: rgba(209, 67, 91, 0.2);
+  --copilot-kit-error-text: var(--color-danger);
+}
+
+/* ── shell ─────────────────────────────────────────────────────────────── */
+.chat-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--surface-page);
+}
+.chat-nav {
+  flex: none;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--color-border);
+}
+.chat-nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 64px;
+  width: 100%;
+  max-width: var(--chat-width);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+.chat-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.chat-brand span {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-faint);
+}
+.chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-note {
+  flex: none;
+  padding: 0 24px 20px;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-faint);
+}
+
+/* ── chat ──────────────────────────────────────────────────────────────── */
+.copilotKitChat {
+  flex: 1;
+  min-height: 0;
+  font-family: var(--font-sans);
+  color: var(--text-body);
+}
+.copilotKitMessagesContainer {
+  width: 100%;
+  max-width: var(--chat-width);
+  margin: 0 auto;
+  padding: 32px 24px 8px;
+}
+.copilotKitMessage {
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  margin-bottom: 20px;
+}
+.copilotKitMessage.copilotKitUserMessage {
+  max-width: 78%;
+  padding: 12px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  color: var(--text-body);
+  line-height: 1.6;
+  font-size: 0.9375rem;
+}
+/* assistant messages carry the brand mark instead of a bubble */
+.copilotKitMessage.copilotKitAssistantMessage {
+  padding-left: 40px;
+  min-height: 28px;
+}
+.copilotKitMessage.copilotKitAssistantMessage::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 28px;
+  height: 28px;
+  background: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='7' fill='%235856D6'/><path d='M8 20L14 8L20 20' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/><path d='M10.6 15.4H17.4' stroke='white' stroke-width='2.5' stroke-linecap='round'/></svg>")
+    center / 28px 28px no-repeat;
+}
+.copilotKitMessage.copilotKitAssistantMessage .copilotKitMessageControls {
+  left: 40px;
+  gap: 14px;
+  color: var(--text-faint);
+}
+/* the greeting is not a response — nothing to copy, rate or regenerate */
+.copilotKitMessagesContainer
+  > .copilotKitAssistantMessage:first-child
+  .copilotKitMessageControls {
+  display: none;
+}
+.copilotKitMessageControlButton {
+  color: var(--text-faint);
+  border-radius: var(--radius-pill);
+}
+.copilotKitMessageControlButton:hover {
+  color: var(--text-body);
+  transform: none;
+}
+a.copilotKitMarkdownElement {
+  color: var(--color-accent);
+  text-decoration: none;
+  transition: opacity var(--transition-fast);
+}
+a.copilotKitMarkdownElement:hover {
+  opacity: 0.7;
+}
+.copilotKitInlineCode {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+}
+.copilotKitCodeBlock {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-size: 0.8125rem;
+}
+
+/* ── composer ──────────────────────────────────────────────────────────── */
+.copilotKitInputContainer {
+  width: 100%;
+  max-width: var(--chat-width);
+  margin: 0 auto;
+  padding: 0 24px 12px;
+}
+.copilotKitInput {
+  width: 100%;
+  margin: 0;
+  min-height: 64px;
+  padding: 14px 16px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.copilotKitInput:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-light);
+}
+.copilotKitInput > textarea {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--text-body);
+}
+.copilotKitInput > textarea::placeholder {
+  color: var(--text-faint);
+}
+.copilotKitInputControlButton {
+  transition: opacity var(--transition-fast);
+}
+.copilotKitInputControlButton:not([disabled]):hover {
+  transform: none;
+  opacity: 0.7;
+}
+
+/* ── approval card ─────────────────────────────────────────────────────── */
+.approval {
+  max-width: var(--chat-width);
+  margin: 0 auto 4px;
+}
+.approval-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 14px;
+}
+.approval-head .badge:last-child {
+  white-space: nowrap;
+}
+.approval-tool {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text-body);
+  background: var(--surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+.btn-danger {
+  color: var(--color-danger);
+  border-color: rgba(209, 67, 91, 0.25);
+}
+.btn-danger:hover {
+  background: var(--color-danger-light);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
