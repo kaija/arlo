@@ -275,7 +275,7 @@ impl StreamingToolExecutor {
 
     /// Join all pending tasks and collect results.
     async fn join_all_pending(&mut self) {
-        let handles: Vec<_> = self.pending.drain(..).collect();
+        let handles = std::mem::take(&mut self.pending);
         for handle in handles {
             match handle.await {
                 Ok(indexed) => self.completed.push(indexed),
