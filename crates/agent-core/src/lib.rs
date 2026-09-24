@@ -27,6 +27,7 @@ pub mod sub_agent;
 pub mod task_store;
 pub mod todolist_tool;
 pub mod tool;
+pub mod transition;
 
 pub use agent::{Agent, AgentBuilder, BoxFuture, Instructions, RunContext, SubAgentDef};
 pub use config::{
@@ -55,7 +56,7 @@ pub use executor::{StreamingToolExecutor, ToolResult};
 
 pub use run_loop::{run, run_stream};
 
-pub use recovery::{RecoveryTracker, MAX_RECOVERY_ATTEMPTS};
+pub use recovery::{RecoveryKey, RecoveryTracker, MAX_RECOVERY_ATTEMPTS};
 
 pub use sub_agent::{SubAgentTool, SubAgentUsage};
 

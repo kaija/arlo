@@ -47,7 +47,6 @@ run() / run_stream()  ──────────► RunEvent stream (subscri
     │
     ▼
 ┌─────────────────── drive() (main loop) ────────────────────┐
-│ Phase 0   turn limit check                                  │
 │ Phase 0.5 inject background task results (TaskStore)        │
 │ Phase 1   context compaction (3-layer CompactionPipeline)   │
 │ Phase 1.5 input guardrails (first turn only)                │
@@ -55,8 +54,9 @@ run() / run_stream()  ──────────► RunEvent stream (subscri
 │ Phase 3   stream model response (errors → RecoveryTracker)  │
 │ Phase 4   StreamingToolExecutor runs tools concurrently     │
 │ Phase 5   resolve_next_step() → NextStep                    │
-│ Phase 6   apply transition (continue / end / interrupt /    │
-│           recover)                                          │
+│ Phase 6   apply_transition() → LoopDecision                 │
+│           (turn increment, FinalOutput gates, recovery,     │
+│            approval pairing — all state changes live here)  │
 └──────────────────────────────────────────────────────────────┘
     │                         │
     ▼                         ▼
@@ -66,6 +66,9 @@ PermissionEngine          TaskStore (TaskEntry + TodoItem)
                               │
                         SubAgentTool (spawns fg/bg sub-agents)
 ```
+
+> For the full loop flow and invariant table see
+> [`doc/run-loop-architecture.md`](run-loop-architecture.md).
 
 `run()` (non-streaming) and `run_stream()` (streaming) share the single `drive()`
 implementation (`run_loop.rs`). In streaming mode every phase emits `RunEvent`s over an
