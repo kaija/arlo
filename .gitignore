@@ -15,3 +15,6 @@ docs/superpowers
 /integration/slack/.venv
 __pycache__/
 .pytest_cache/
+
+# Local env (see .env.example)
+.env
