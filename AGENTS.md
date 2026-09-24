@@ -34,7 +34,7 @@ All paths relative to `crates/`.
 | Sub-agents | `agent-core/src/sub_agent.rs` (`SubAgentTool`, fg/bg modes), `agent.rs` (`SubAgentDef`, `Agent` builder) |
 | Errors & recovery | `agent-core/src/error.rs` (`RunError`/`ModelError`/`ToolError`), `recovery.rs` (`RecoveryTracker`) |
 | Context compaction | `agent-core/src/compaction/` — 3 layers: tools_compact → session_memory → full_summarize |
-| LLM providers | `agent-llm/src/provider.rs` (`UnifiedProvider`), `openai_http.rs`, `retry.rs`, `model_override.rs`; profiles in `agent-core/src/profile.rs`, resolution in `config_resolver.rs` |
+| LLM providers | `agent-llm/src/provider.rs` (`UnifiedProvider`, `OpenAIOptions`), `openai_http.rs` (Chat Completions), `openai_responses_http.rs` (Responses API, profile `extra.api = "responses"`), `retry.rs`, `model_override.rs`; profiles in `agent-core/src/profile.rs`, resolution in `config_resolver.rs` |
 | Built-in tools | `agent-tools/src/` — file_read/write/edit, glob, grep, shell, web_fetch, web_search |
 | MCP client | `agent-mcp/src/` |
 | TUI / CLI | `agent-cli/src/main.rs` (wiring, agent builder), `agent-cli/src/tui/` (approval UI in `approval.rs`, event loop in `event_loop.rs`) |

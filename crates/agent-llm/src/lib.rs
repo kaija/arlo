@@ -16,6 +16,7 @@ pub mod anthropic_http;
 pub mod convert;
 pub mod model_override;
 pub mod openai_http;
+pub mod openai_responses_http;
 pub mod provider;
 pub mod retry;
 
@@ -23,7 +24,8 @@ pub use agent_core;
 pub use anthropic_http::AnthropicHttpModel;
 pub use model_override::ModelOverrideWrapper;
 pub use openai_http::OpenAIHttpModel;
-pub use provider::UnifiedProvider;
+pub use openai_responses_http::OpenAIResponsesHttpModel;
+pub use provider::{OpenAIApi, OpenAIOptions, UnifiedProvider};
 pub use retry::RetryConfig;
 
 #[cfg(test)]

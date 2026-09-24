@@ -25,6 +25,9 @@ pub struct OpenAIHttpModel {
     api_key: String,
     /// Base URL for the API (e.g., "https://api.openai.com/v1")
     base_url: String,
+    /// Sent as `reasoning_effort` when set (e.g. "none" to allow function
+    /// tools on reasoning models that reject them otherwise).
+    reasoning_effort: Option<String>,
     /// HTTP client (reusable across requests)
     client: Client,
 }
@@ -46,8 +49,14 @@ impl OpenAIHttpModel {
             model_name,
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
+            reasoning_effort: None,
             client,
         }
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
     }
 
     /// Build the JSON request body for chat completions.
@@ -68,6 +77,10 @@ impl OpenAIHttpModel {
         // The legacy "max_tokens" param is deprecated and rejected by newer models.
         let token_limit = request.max_tokens.unwrap_or(4096);
         body["max_completion_tokens"] = json!(token_limit);
+
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
 
         // Reasoning models (o-series) don't support temperature — skip it for those.
         if let Some(temp) = request.temperature {

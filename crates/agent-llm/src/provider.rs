@@ -19,6 +19,77 @@ use agent_core::model::{Model, ModelProvider, ModelRequest, ModelResponse, Model
 
 use crate::anthropic_http::AnthropicHttpModel;
 use crate::openai_http::OpenAIHttpModel;
+use crate::openai_responses_http::OpenAIResponsesHttpModel;
+
+/// Which OpenAI HTTP API a model is served through.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAIApi {
+    /// `/chat/completions` (default; also what most compatible proxies speak).
+    #[default]
+    ChatCompletions,
+    /// `/responses` — required for function tools + reasoning on newer models.
+    Responses,
+}
+
+/// OpenAI-specific settings, read from a profile's `extra` map:
+///
+/// ```json
+/// "gpt": { "provider": "openai", "model": "gpt-6-luna",
+///          "extra": { "api": "responses", "reasoning_effort": "high",
+///                     "reasoning_summary": "auto" } }
+/// ```
+///
+/// Without a profile, the env vars `OPENAI_API`, `OPENAI_REASONING_EFFORT` and
+/// `OPENAI_REASONING_SUMMARY` set the same values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenAIOptions {
+    pub api: OpenAIApi,
+    /// Sent as `reasoning.effort` (Responses) or `reasoning_effort` (Chat).
+    pub reasoning_effort: Option<String>,
+    /// Sent as `reasoning.summary` (Responses only).
+    pub reasoning_summary: Option<String>,
+}
+
+impl OpenAIOptions {
+    fn parse_api(value: &str) -> Result<OpenAIApi, ModelError> {
+        match value {
+            "chat" | "chat_completions" => Ok(OpenAIApi::ChatCompletions),
+            "responses" => Ok(OpenAIApi::Responses),
+            other => Err(ModelError::Connection(format!(
+                "Unknown OpenAI api '{}': expected \"chat\" or \"responses\"",
+                other
+            ))),
+        }
+    }
+
+    /// Read options from a profile's `extra` map. Unknown `api` values are an error.
+    pub fn from_extra(
+        extra: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<Self, ModelError> {
+        let get = |key: &str| extra.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        Ok(Self {
+            api: match get("api") {
+                Some(api) => Self::parse_api(&api)?,
+                None => OpenAIApi::default(),
+            },
+            reasoning_effort: get("reasoning_effort"),
+            reasoning_summary: get("reasoning_summary"),
+        })
+    }
+
+    /// Read options from `OPENAI_API` / `OPENAI_REASONING_EFFORT` /
+    /// `OPENAI_REASONING_SUMMARY`. An unknown `OPENAI_API` falls back to chat.
+    pub fn from_env() -> Self {
+        let get = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+        Self {
+            api: get("OPENAI_API")
+                .and_then(|v| Self::parse_api(&v).ok())
+                .unwrap_or_default(),
+            reasoning_effort: get("OPENAI_REASONING_EFFORT"),
+            reasoning_summary: get("OPENAI_REASONING_SUMMARY"),
+        }
+    }
+}
 
 /// A unified provider that routes model requests to the appropriate backend.
 ///
@@ -46,6 +117,10 @@ pub struct UnifiedProvider {
     /// Custom base URL for OpenAI-compatible endpoints.
     #[cfg(feature = "openai")]
     openai_base_url: Option<String>,
+
+    /// Which OpenAI wire API to use and its reasoning settings.
+    #[cfg(feature = "openai")]
+    openai_options: OpenAIOptions,
 
     /// Anthropic API key (present means Anthropic provider is available).
     #[cfg(feature = "anthropic")]
@@ -82,6 +157,9 @@ impl UnifiedProvider {
         #[cfg(feature = "openai")]
         let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
 
+        #[cfg(feature = "openai")]
+        let openai_options = OpenAIOptions::from_env();
+
         #[cfg(feature = "anthropic")]
         let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -107,6 +185,8 @@ impl UnifiedProvider {
             openai_key,
             #[cfg(feature = "openai")]
             openai_base_url,
+            #[cfg(feature = "openai")]
+            openai_options,
             #[cfg(feature = "anthropic")]
             anthropic_key,
             #[cfg(feature = "anthropic")]
@@ -143,6 +223,8 @@ impl UnifiedProvider {
             openai_key,
             #[cfg(feature = "openai")]
             openai_base_url,
+            #[cfg(feature = "openai")]
+            openai_options: OpenAIOptions::default(),
             #[cfg(feature = "anthropic")]
             anthropic_key,
             #[cfg(feature = "anthropic")]
@@ -158,6 +240,13 @@ impl UnifiedProvider {
         }
 
         Ok(provider)
+    }
+
+    /// Set the OpenAI wire API and reasoning options.
+    #[cfg(feature = "openai")]
+    pub fn with_openai_options(mut self, options: OpenAIOptions) -> Self {
+        self.openai_options = options;
+        self
     }
 
     /// Construct a `UnifiedProvider` from a resolved profile.
@@ -179,6 +268,7 @@ impl UnifiedProvider {
                 default_provider,
                 openai_key: profile.api_key.clone(),
                 openai_base_url: profile.base_url.clone(),
+                openai_options: OpenAIOptions::from_extra(&profile.extra)?,
                 #[cfg(feature = "anthropic")]
                 anthropic_key: None,
                 #[cfg(feature = "anthropic")]
@@ -193,6 +283,8 @@ impl UnifiedProvider {
                 openai_key: None,
                 #[cfg(feature = "openai")]
                 openai_base_url: None,
+                #[cfg(feature = "openai")]
+                openai_options: OpenAIOptions::default(),
                 anthropic_key: profile.api_key.clone(),
                 anthropic_base_url: profile.base_url.clone(),
                 #[cfg(feature = "ollama")]
@@ -205,6 +297,8 @@ impl UnifiedProvider {
                 openai_key: None,
                 #[cfg(feature = "openai")]
                 openai_base_url: None,
+                #[cfg(feature = "openai")]
+                openai_options: OpenAIOptions::default(),
                 #[cfg(feature = "anthropic")]
                 anthropic_key: None,
                 #[cfg(feature = "anthropic")]
@@ -380,11 +474,20 @@ impl ModelProvider for UnifiedProvider {
                     .as_deref()
                     .unwrap_or("https://api.openai.com/v1")
                     .to_string();
-                Ok(Arc::new(OpenAIHttpModel::new(
-                    bare_name,
-                    api_key.clone(),
-                    base_url,
-                )))
+                let opts = &self.openai_options;
+                match opts.api {
+                    OpenAIApi::ChatCompletions => Ok(Arc::new(
+                        OpenAIHttpModel::new(bare_name, api_key.clone(), base_url)
+                            .with_reasoning_effort(opts.reasoning_effort.clone()),
+                    )),
+                    OpenAIApi::Responses => Ok(Arc::new(
+                        OpenAIResponsesHttpModel::new(bare_name, api_key.clone(), base_url)
+                            .with_reasoning(
+                                opts.reasoning_effort.clone(),
+                                opts.reasoning_summary.clone(),
+                            ),
+                    )),
+                }
             }
             #[cfg(feature = "anthropic")]
             "anthropic" => {
@@ -523,6 +626,8 @@ mod tests {
             openai_key: openai.map(|s| s.to_string()),
             #[cfg(feature = "openai")]
             openai_base_url: None,
+            #[cfg(feature = "openai")]
+            openai_options: OpenAIOptions::default(),
             #[cfg(feature = "anthropic")]
             anthropic_key: anthropic.map(|s| s.to_string()),
             #[cfg(feature = "anthropic")]
@@ -628,6 +733,8 @@ mod tests {
             openai_key: None,
             #[cfg(feature = "openai")]
             openai_base_url: None,
+            #[cfg(feature = "openai")]
+            openai_options: OpenAIOptions::default(),
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
             #[cfg(feature = "anthropic")]
@@ -645,6 +752,8 @@ mod tests {
             default_provider: Some("openai".to_string()),
             openai_key: Some("sk-test".to_string()),
             openai_base_url: None,
+            #[cfg(feature = "openai")]
+            openai_options: OpenAIOptions::default(),
             #[cfg(feature = "anthropic")]
             anthropic_key: None,
             #[cfg(feature = "anthropic")]
@@ -864,6 +973,36 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn from_profile_openai_responses_options() {
+        let mut profile = make_resolved_profile("openai", Some("sk-test-key"), None);
+        profile.extra.insert("api".into(), "responses".into());
+        profile
+            .extra
+            .insert("reasoning_effort".into(), "high".into());
+        let provider = UnifiedProvider::from_profile(&profile).unwrap();
+        assert_eq!(
+            provider.openai_options,
+            OpenAIOptions {
+                api: OpenAIApi::Responses,
+                reasoning_effort: Some("high".into()),
+                reasoning_summary: None,
+            }
+        );
+        let model = provider.resolve("gpt-test").await.unwrap();
+        assert_eq!(model.provider(), "openai");
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn from_profile_openai_rejects_unknown_api() {
+        let mut profile = make_resolved_profile("openai", Some("sk-test-key"), None);
+        profile.extra.insert("api".into(), "assistants".into());
+        let err = UnifiedProvider::from_profile(&profile).unwrap_err();
+        assert!(format!("{}", err).contains("assistants"));
+    }
+
     #[test]
     fn from_profile_unknown_provider_returns_error() {
         let profile = make_resolved_profile("unknown", Some("some-key"), None);
@@ -921,6 +1060,8 @@ mod prop_tests {
             openai_key: Some("sk-test-key".to_string()),
             #[cfg(feature = "openai")]
             openai_base_url: None,
+            #[cfg(feature = "openai")]
+            openai_options: OpenAIOptions::default(),
             #[cfg(feature = "anthropic")]
             anthropic_key: Some("sk-ant-test-key".to_string()),
             #[cfg(feature = "anthropic")]
